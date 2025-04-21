@@ -47,7 +47,7 @@ Một hệ thống tập tin ảo đơn giản được viết bằng C, sử d�
 1.  Clone repository này (hoặc tải mã nguồn về):
     ```bash
     # Ví dụ nếu bạn đã đưa lên GitHub
-    # git clone [https://github.com/your-username/remote-proc-fuse.git](https://github.com/your-username/remote-proc-fuse.git)
+    # git clone https://github.com/Winz18/remote_proc_fuse.git
     # cd remote-proc-fuse
     ```
 2.  Chạy lệnh `make` trong thư mục gốc của dự án:
