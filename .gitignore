@@ -1,0 +1,17 @@
+# Build artifacts from Makefile
+obj/
+bin/
+*.o
+
+# Editor backup files
+*~
+*.swp
+*.swo
+
+# macOS specific
+.DS_Store
+
+# Add other files/directories you want to ignore below
+# Ví dụ: cấu hình local, file log riêng...
+# *.log
+# config.local
