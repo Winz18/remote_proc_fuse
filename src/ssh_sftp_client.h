@@ -37,4 +37,7 @@ ssize_t sftp_read_remote(LIBSSH2_SFTP_HANDLE *handle, char *buffer, size_t count
 // Đóng file từ xa
 int sftp_close_remote(LIBSSH2_SFTP_HANDLE *handle);
 
+// Chuyển đổi mã lỗi SFTP sang mã lỗi POSIX errno
+int sftp_error_to_errno(unsigned long sftp_err);
+
 #endif // SSH_SFTP_CLIENT_H

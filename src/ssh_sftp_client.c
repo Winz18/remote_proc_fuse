@@ -61,6 +61,12 @@ int sftp_connect_and_auth(remote_conn_info_t *conn) {
     }
     LOG_INFO("SSH handshake successful");
 
+    // *** THÊM ĐẶT TIMEOUT ***
+    long session_timeout_ms = 60000; // Ví dụ: 60 giây
+    libssh2_session_set_timeout(conn->ssh_session, session_timeout_ms);
+    LOG_INFO("Set SSH session timeout to %ld ms", session_timeout_ms);
+    // *** KẾT THÚC THÊM TIMEOUT ***
+
     // --- Xác thực ---
     const char *fingerprint = libssh2_hostkey_hash(conn->ssh_session, LIBSSH2_HOSTKEY_HASH_SHA1);
     LOG_INFO("Host key fingerprint (SHA1):");
@@ -249,4 +255,44 @@ int sftp_close_remote(LIBSSH2_SFTP_HANDLE *handle) {
                  rc, libssh2_sftp_last_error(conn->sftp_session));
     }
     return rc;
+}
+
+// Hàm chuyển đổi mã lỗi SFTP sang mã lỗi POSIX errno
+int sftp_error_to_errno(unsigned long sftp_err) {
+    switch (sftp_err) {
+        case LIBSSH2_FX_OK:
+            return 0; // Thành công
+        case LIBSSH2_FX_EOF:
+            return 0; // End-of-file không phải là lỗi, nhưng read sẽ trả về 0 byte
+        case LIBSSH2_FX_NO_SUCH_FILE:
+        case LIBSSH2_FX_NO_SUCH_PATH:
+            return ENOENT; // No such file or directory
+        case LIBSSH2_FX_PERMISSION_DENIED:
+            return EACCES; // Permission denied
+        case LIBSSH2_FX_FAILURE:
+            return EIO; // Generic failure -> I/O error
+        case LIBSSH2_FX_BAD_MESSAGE:
+            return EIO; // Bad message -> I/O error
+        case LIBSSH2_FX_NO_CONNECTION:
+        case LIBSSH2_FX_CONNECTION_LOST:
+            return ENOTCONN; // Hoặc EIO? Connection lost
+        case LIBSSH2_FX_OP_UNSUPPORTED:
+            return ENOSYS; // Operation not supported
+        case LIBSSH2_FX_INVALID_HANDLE:
+            return EBADF; // Invalid file handle (descriptor)
+        case LIBSSH2_FX_INVALID_PARAMETER:
+            return EINVAL; // Invalid parameter
+        case LIBSSH2_FX_FILE_ALREADY_EXISTS:
+            return EEXIST; // File exists (cho create/mkdir)
+        case LIBSSH2_FX_WRITE_PROTECT:
+            return EROFS; // Read-only filesystem (cho write ops)
+        case LIBSSH2_FX_NO_MEDIA:
+            return ENOMEDIUM; // No media in drive
+        case LIBSSH2_FX_DIR_NOT_EMPTY:
+            return ENOTEMPTY; // Directory not empty (cho rmdir)
+        // Thêm các mã lỗi khác nếu cần
+        default:
+            LOG_ERR("Unknown SFTP error code: %lu", sftp_err);
+            return EIO; // Lỗi I/O chung cho các trường hợp không xác định
+    }
 }

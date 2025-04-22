@@ -79,19 +79,12 @@ int rp_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi) 
     free(remote_path);
 
     if (rc != 0) {
-         // Kiểm tra mã lỗi SFTP cụ thể
-         remote_conn_info_t *conn = get_conn_info();
-         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
-         if (sftp_err == LIBSSH2_FX_NO_SUCH_FILE || sftp_err == LIBSSH2_FX_NO_SUCH_PATH) {
-             LOG_DEBUG("getattr: Path not found on remote: %s", path);
-             return -ENOENT; // File hoặc thư mục không tồn tại
-         } else if (sftp_err == LIBSSH2_FX_PERMISSION_DENIED) {
-              LOG_DEBUG("getattr: Permission denied on remote for: %s", path);
-              return -EACCES; // Không có quyền truy cập
-         } else {
-             LOG_ERR("getattr: sftp_stat_remote failed for %s with rc=%d, sftp_err=%lu", path, rc, sftp_err);
-             return -EIO; // Lỗi I/O chung
-         }
+        remote_conn_info_t *conn = get_conn_info();
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err); // <<< SỬ DỤNG HELPER
+        LOG_DEBUG("getattr: sftp_stat_remote failed for %s, rc=%d, sftp_err=%lu -> errno=%d", path, rc, sftp_err, err);
+        // Trả về mã lỗi đã ánh xạ, hoặc EIO nếu helper trả về 0 (không nên xảy ra khi rc!=0)
+        return -err ? -err : -EIO;
     }
 
     // --- Chuyển đổi SFTP attributes sang struct stat ---
@@ -131,28 +124,28 @@ int rp_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi) 
 
     if (attrs.flags & LIBSSH2_SFTP_ATTR_SIZE) {
         stbuf->st_size = attrs.filesize;
-        // *** THÊM ĐOẠN KIỂM TRA NÀY ***
-        // Nếu là file thường và size trả về là 0, báo cáo size > 0 để khuyến khích đọc
-        if (S_ISREG(stbuf->st_mode) && stbuf->st_size == 0) {
-             LOG_DEBUG("getattr: Reporting non-zero size for zero-sized regular file %s", path);
-             // Bạn có thể thử 1 hoặc một giá trị lớn hơn như kích thước page
-             stbuf->st_size = 4096; // Thử báo cáo 4KB
+    
+        // *** THAY ĐỔI LOGIC XỬ LÝ SIZE 0 ***
+        // Chỉ báo cáo size giả > 0 nếu là file thường, size thực là 0 VÀ
+        // đường dẫn cơ sở là "/proc" mặc định.
+        remote_conn_info_t *conn = get_conn_info(); // Lấy thông tin kết nối
+        if (S_ISREG(stbuf->st_mode) && stbuf->st_size == 0 &&
+            conn && strcmp(conn->remote_proc_path, "/proc") == 0)
+        {
+            LOG_DEBUG("getattr: Reporting non-zero size (4096) for zero-sized regular file under default /proc path: %s", path);
+            stbuf->st_size = 4096; // Giữ nguyên mẹo cho /proc
         }
-        // *** KẾT THÚC ĐOẠN KIỂM TRA ***
+        // *** KẾT THÚC THAY ĐỔI ***
+    
     } else {
-        // /proc files thường có size 0 khi stat, nhưng vẫn đọc được
-        // Nếu không có thông tin size, và là file thường, cũng báo cáo size > 0
-         if (S_ISREG(stbuf->st_mode)) {
-             LOG_DEBUG("getattr: Reporting non-zero size for file %s with unknown remote size", path);
-             stbuf->st_size = 4096;
-         } else {
-              stbuf->st_size = 0; // Thư mục vẫn có thể có size 0
-         }
+        // Nếu không có thông tin size từ remote
+        stbuf->st_size = 0; // Mặc định là 0
+        // Có thể thêm logic tương tự trên nếu cần, nhưng ít xảy ra hơn
     }
-
-    // Cập nhật số block dựa trên size mới (nếu cần)
+    
+    // Cập nhật số block dựa trên size mới
     stbuf->st_blksize = 4096;
-    stbuf->st_blocks = (stbuf->st_size + stbuf->st_blksize -1) / stbuf->st_blksize;
+    stbuf->st_blocks = (stbuf->st_size + stbuf->st_blksize - 1) / stbuf->st_blksize;
 
      // /proc files thường thay đổi liên tục, timestamps không quá quan trọng
     if (attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME) {
@@ -192,22 +185,25 @@ int rp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
     free(remote_path); // Không cần nữa
 
     if (!handle) {
-        // Kiểm tra lỗi cụ thể
         remote_conn_info_t *conn = get_conn_info();
         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
-        if (sftp_err == LIBSSH2_FX_NO_SUCH_FILE || sftp_err == LIBSSH2_FX_NO_SUCH_PATH) {
-             return -ENOENT;
-        } else if (sftp_err == LIBSSH2_FX_PERMISSION_DENIED) {
-             return -EACCES;
-        } else if (sftp_err == LIBSSH2_FX_OP_UNSUPPORTED || sftp_err == LIBSSH2_FX_FAILURE) {
-            // Có thể là do cố gắng opendir một file thường?
-            // FUSE nên kiểm tra bằng getattr trước, nhưng phòng hờ.
-            return -ENOTDIR;
+        int err = sftp_error_to_errno(sftp_err); // <<< SỬ DỤNG HELPER
+
+        LOG_ERR("readdir: sftp_opendir_remote failed for path '%s', sftp_err=%lu -> errno=%d",
+                path, sftp_err, err);
+
+        // Xử lý thêm: Nếu lỗi là không hỗ trợ (ENOSYS) hoặc lỗi chung (EIO),
+        // có khả năng cao là do cố gắng mở file như thư mục. Trả về ENOTDIR.
+        // Các lỗi như ENOENT, EACCES đã được helper xử lý đúng.
+        if (err == ENOSYS || err == EIO) {
+             // Để chắc chắn hơn, có thể gọi lại getattr để kiểm tra type, nhưng
+             // tạm thời trả về ENOTDIR dựa trên ngữ cảnh opendir thất bại
+             LOG_ERR("readdir: Assuming path '%s' is not a directory.", path);
+             return -ENOTDIR; // Not a directory
         }
-        else {
-            LOG_ERR("readdir: sftp_opendir_remote failed for %s", path);
-            return -EIO;
-        }
+
+        // Trả về mã lỗi đã ánh xạ (hoặc EIO nếu không xác định được)
+        return -err ? -err : -EIO;
     }
 
     // Thêm "." và ".." vào kết quả
@@ -267,21 +263,24 @@ int rp_open(const char *path, struct fuse_file_info *fi) {
     free(remote_path);
 
     if (!handle) {
-         // Kiểm tra lỗi cụ thể
-         remote_conn_info_t *conn = get_conn_info();
-         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
-         if (sftp_err == LIBSSH2_FX_NO_SUCH_FILE) {
-             return -ENOENT;
-         } else if (sftp_err == LIBSSH2_FX_PERMISSION_DENIED) {
-             return -EACCES;
-         } else if (sftp_err == LIBSSH2_FX_OP_UNSUPPORTED || sftp_err == LIBSSH2_FX_FAILURE) {
-             // Có thể là cố gắng mở thư mục như file?
-             return -EISDIR; // Hoặc EACCES?
-         }
-         else {
-             LOG_ERR("open: sftp_open_remote failed for %s", path);
-             return -EIO;
-         }
+        remote_conn_info_t *conn = get_conn_info();
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err); // <<< SỬ DỤNG HELPER
+   
+        // Xử lý thêm trường hợp đặc biệt: nếu lỗi là EACCES nhưng cố mở thư mục -> EISDIR
+        if (err == EACCES || err == EINVAL) { // SFTP có thể trả về PERMISSION_DENIED hoặc INVALID_PARAMETER/FAILURE khi mở dir
+            // Thử stat lại để chắc chắn đó là thư mục
+            LIBSSH2_SFTP_ATTRIBUTES attrs;
+            char *r_path_stat = build_remote_path(path);
+            if(r_path_stat && sftp_stat_remote(r_path_stat, &attrs) == 0 && S_ISDIR(attrs.permissions)) {
+                free(r_path_stat);
+                LOG_ERR("open: Attempted to open a directory: %s", path);
+                return -EISDIR; // Là thư mục
+            }
+            free(r_path_stat);
+        }
+        LOG_ERR("open: sftp_open_remote failed for %s, sftp_err=%lu -> errno=%d", path, sftp_err, err);
+        return -err ? -err : -EIO;
     }
 
     // Lưu handle vào fi->fh để dùng trong read/release
