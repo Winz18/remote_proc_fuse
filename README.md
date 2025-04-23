@@ -1,136 +1,260 @@
-# Remote Proc FUSE Filesystem
+# RemoteFS - FUSE-based Remote Filesystem
 
-Một hệ thống tập tin ảo đơn giản được viết bằng C, sử dụng FUSE (Filesystem in Userspace) và thư viện libssh2 để cho phép bạn "mount" thư mục `/proc` của một máy Linux từ xa vào hệ thống cục bộ thông qua kết nối SSH/SFTP. Sau khi mount, bạn có thể sử dụng các lệnh Linux thông thường như `ls`, `cat`, `cd`, `head`, `file`... để duyệt và xem thông tin từ `/proc` của máy từ xa ngay trên máy cục bộ của mình.
+RemoteFS là một hệ thống tập tin đa năng được phát triển bằng C, cho phép bạn "mount" bất kỳ thư mục nào từ máy chủ Linux từ xa vào hệ thống cục bộ thông qua kết nối SSH/SFTP. Ứng dụng này sử dụng FUSE (Filesystem in Userspace) và thư viện libssh2 để tạo ra một cầu nối liền mạch giữa hệ thống cục bộ và từ xa.
 
-## Tính năng
+![RemoteFS Logo](https://example.com/remotefs-logo.png)
 
-* Mount thư mục `/proc` (hoặc đường dẫn cơ sở khác) từ máy Linux từ xa vào một điểm mount cục bộ.
-* Truy cập **chỉ đọc** (read-only) vào các file và thư mục trong `/proc` từ xa.
-* Sử dụng các lệnh shell tiêu chuẩn để tương tác (ví dụ: `ls /mnt/remote/1/status`, `cat /mnt/remote/meminfo`).
-* Kết nối đến máy chủ SSH từ xa bằng giao thức SFTP.
-* Hỗ trợ xác thực bằng mật khẩu hoặc khóa SSH (public key authentication).
-* Cho phép tùy chỉnh cổng SSH và đường dẫn cơ sở trên máy remote.
+## Tổng quan
 
-## Yêu cầu Cài đặt
+RemoteFS cho phép bạn làm việc với dữ liệu từ xa như thể chúng đang ở trên máy tính cục bộ của bạn. Sau khi mount, bạn có thể:
 
-Để biên dịch và chạy dự án này, bạn cần cài đặt các gói sau trên máy cục bộ (máy sẽ chạy chương trình FUSE):
+- Duyệt thư mục từ xa với các lệnh cục bộ như `ls`, `cd`, `find`
+- Đọc nội dung file từ xa với `cat`, `less`, `head`, `tail`
+- Chỉnh sửa file từ xa bằng trình soạn thảo yêu thích như VS Code, Vim, Nano
+- Sao chép, di chuyển, đổi tên và xóa file từ xa
+- Tự động đồng bộ hóa các thay đổi với máy chủ từ xa
+- **Sao chép và di chuyển file giữa hệ thống cục bộ và từ xa** với lệnh `remote-cp` và `remote-mv`
 
-* **Trình biên dịch và Công cụ Build:**
-    * `gcc`
-    * `make`
-    * `pkg-config`
-* **Thư viện FUSE 3:**
-    * `libfuse3-dev` (Debian/Ubuntu) hoặc `fuse3-devel` (Fedora/CentOS/RHEL)
-    * `fuse3` (Gói runtime, thường được cài cùng `-dev`/`-devel`)
-* **Thư viện Libssh2:**
-    * `libssh2-1-dev` (Debian/Ubuntu) hoặc `libssh2-devel` (Fedora/CentOS/RHEL)
+## Tính năng chính
 
-**Trên máy từ xa:**
+- **Truy cập từ xa liền mạch**: Mount bất kỳ thư mục nào từ máy chủ Linux từ xa
+- **Tương thích đa dạng**: Hoạt động với các lệnh shell tiêu chuẩn và ứng dụng đồ họa
+- **Hỗ trợ đầy đủ đọc/ghi**: Không chỉ xem mà còn có thể chỉnh sửa nội dung từ xa
+- **Hỗ trợ IDE**: Tương thích với VS Code, Sublime Text, và các IDE khác
+- **Bảo mật cao**: Xác thực qua SSH với hỗ trợ khóa công khai và mật khẩu
+- **Hiệu năng tối ưu**: Được thiết kế để giảm thiểu độ trễ mạng
+- **Tiện ích hỗ trợ**: Các lệnh `remote-cp` và `remote-mv` để dễ dàng sao chép và di chuyển file
 
-* Cần có một máy chủ SSH đang chạy (`sshd`).
+## Yêu cầu hệ thống
 
-**Lệnh cài đặt ví dụ:**
+### Trên máy cục bộ (client)
 
-* **Trên Debian/Ubuntu:**
-    ```bash
-    sudo apt update
-    sudo apt install gcc make pkg-config libfuse3-dev libssh2-1-dev fuse3
-    ```
-* **Trên Fedora/CentOS/RHEL:**
-    ```bash
-    sudo dnf update
-    sudo dnf install gcc make pkgconf-pkg-config fuse3-devel libssh2-devel fuse3
-    ```
+- **Hệ điều hành**: Linux (đã thử nghiệm trên Ubuntu, Debian, Fedora, Kali)
+- **Trình biên dịch**: gcc, make, pkg-config
+- **Thư viện**:
+  * FUSE 3 (`libfuse3-dev` trên Debian/Ubuntu)
+  * libssh2 (`libssh2-1-dev` trên Debian/Ubuntu)
 
-## Biên dịch Dự án
+### Trên máy chủ từ xa (server)
 
-1.  Clone repository này (hoặc tải mã nguồn về):
-    ```bash
-    # Ví dụ nếu bạn đã đưa lên GitHub
-    # git clone https://github.com/Winz18/remote_proc_fuse.git
-    # cd remote-proc-fuse
-    ```
-2.  Chạy lệnh `make` trong thư mục gốc của dự án:
-    ```bash
-    make
-    ```
-    Thao tác này sẽ biên dịch mã nguồn trong thư mục `src/` và tạo ra file thực thi tại `bin/remote_proc_fuse`.
+- **Hệ điều hành**: Bất kỳ hệ thống Linux nào có SSH server
+- **Dịch vụ**: OpenSSH (hoặc tương đương)
 
-## Sử dụng
+## Cài đặt
 
-1.  **Tạo một thư mục trống** để làm điểm mount trên máy cục bộ:
-    ```bash
-    mkdir ~/my_remote_proc
-    ```
-2.  **Chạy file thực thi** với các tùy chọn cần thiết:
+### Cài đặt các gói phụ thuộc
 
-    ```bash
-    ./bin/remote_proc_fuse <mount_point> -o host=<hostname> -o user=<username> [các_tùy_chọn_khác]
-    ```
+#### Debian/Ubuntu/Kali:
+```bash
+sudo apt update
+sudo apt install gcc make pkg-config libfuse3-dev libssh2-1-dev fuse3
+```
 
-    **Các tùy chọn `-o` bắt buộc:**
+#### Fedora/RHEL/CentOS:
+```bash
+sudo dnf update
+sudo dnf install gcc make pkgconf-pkg-config fuse3-devel libssh2-devel fuse3
+```
 
-    * `host=<hostname>`: Địa chỉ IP hoặc hostname của máy Linux từ xa.
-    * `user=<username>`: Tên người dùng để đăng nhập SSH.
+#### Arch Linux:
+```bash
+sudo pacman -Syu
+sudo pacman -S gcc make pkg-config fuse3 libssh2
+```
 
-    **Các tùy chọn `-o` tùy chọn:**
+### Biên dịch RemoteFS
 
-    * `port=<port>`: Cổng SSH trên máy từ xa (mặc định là 22).
-    * `pass=<password>`: Mật khẩu để đăng nhập SSH. **(Cảnh báo: Sử dụng tùy chọn này không an toàn vì mật khẩu hiển thị trong lịch sử lệnh và danh sách tiến trình. Nên ưu tiên dùng khóa SSH).**
-    * `key=<keyfile>`: Đường dẫn đến file khóa riêng (private key) SSH để xác thực (ví dụ: `~/.ssh/id_rsa`).
-    * `pass=<passphrase>`: Nếu khóa SSH của bạn có mật khẩu (passphrase), hãy sử dụng tùy chọn này *cùng với* tùy chọn `key=...` để cung cấp passphrase.
-    * `remoteprocpath=<path>`: Đường dẫn cơ sở trên hệ thống từ xa để mount (mặc định là `/proc`).
+1. Clone repository (hoặc tải mã nguồn về):
+   ```bash
+   git clone https://github.com/yourusername/remotefs.git
+   cd remotefs
+   ```
 
-    **Cờ FUSE hữu ích:**
+2. Biên dịch mã nguồn:
+   ```bash
+   make
+   ```
 
-    * `-f`: Chạy ở chế độ foreground (không tách ra chạy nền). Hữu ích cho việc xem log trực tiếp. Nhấn `Ctrl+C` để dừng và unmount.
-    * `-d`: Chạy ở chế độ debug FUSE (và bật log debug của ứng dụng này). Rất hữu ích khi kết hợp với `-f`.
+3. (Tùy chọn) Cài đặt vào hệ thống:
+   ```bash
+   sudo make install
+   ```
 
-3.  **Unmount Filesystem:** Khi bạn sử dụng xong, hãy unmount filesystem:
-    ```bash
-    fusermount3 -u <mount_point>
-    ```
-    Ví dụ:
-    ```bash
-    fusermount3 -u ~/my_remote_proc
-    ```
+## Hướng dẫn sử dụng
 
-## Ví dụ
+### Cách mount một thư mục từ xa
 
-* **Mount sử dụng mật khẩu (kém an toàn):**
-    ```bash
-    ./bin/remote_proc_fuse ~/my_remote_proc -o host=192.168.1.100 -o user=myuser -o pass=mypassword123
-    ```
+1. Tạo một thư mục mount point trên máy cục bộ:
+   ```bash
+   mkdir ~/remote_mount
+   ```
 
-* **Mount sử dụng khóa SSH (khuyến nghị):**
-    ```bash
-    # Key không có passphrase
-    ./bin/remote_proc_fuse ~/my_remote_proc -o host=server.example.com -o user=admin -o key=~/.ssh/id_rsa
+2. Mount thư mục từ xa:
+   ```bash
+   remotefs ~/remote_mount -o host=server.example.com -o user=username -o key=~/.ssh/id_rsa -o remotepath=/path/to/remote/directory
+   ```
 
-    # Key có passphrase
-    ./bin/remote_proc_fuse ~/my_remote_proc -o host=server.example.com -o user=admin -o key=/path/to/mykey -o pass=key_passphrase
-    ```
+   hoặc nếu bạn chưa cài đặt:
+   ```bash
+   ./bin/remotefs ~/remote_mount -o host=server.example.com -o user=username -o key=~/.ssh/id_rsa -o remotepath=/path/to/remote/directory
+   ```
 
-* **Mount vào localhost để kiểm thử (cần sshd chạy trên localhost):**
-    ```bash
-    ./bin/remote_proc_fuse ~/my_remote_proc -f -d -o host=localhost -o user=$(whoami) -o key=~/.ssh/id_rsa
-    ```
+### Các tùy chọn mount
 
-* **Sau khi mount thành công:**
-    ```bash
-    ls -l ~/my_remote_proc
-    cat ~/my_remote_proc/meminfo
-    cat ~/my_remote_proc/cpuinfo
-    ls ~/my_remote_proc/1/ # Xem thư mục của tiến trình PID 1
-    cat ~/my_remote_proc/1/cmdline
-    cd ~/my_remote_proc/net
-    cat tcp
-    ```
+| Tùy chọn | Mô tả | Mặc định |
+|----------|-------|---------|
+| host=HOSTNAME | Địa chỉ IP hoặc hostname của máy chủ từ xa | (bắt buộc) |
+| user=USERNAME | Tên người dùng SSH | (bắt buộc) |
+| port=PORT | Cổng SSH | 22 |
+| key=KEYFILE | Đường dẫn đến file khóa SSH | Không có |
+| pass=PASSWORD | Mật khẩu SSH hoặc passphrase của khóa | Không có |
+| remotepath=PATH | Đường dẫn thư mục trên máy chủ từ xa | / |
+| readonly | Mount ở chế độ chỉ đọc | Không |
+| allow_other | Cho phép các người dùng khác truy cập | Không |
 
-## Giới hạn
+### Các cờ FUSE hữu ích
 
-* **Chỉ đọc (Read-Only):** Không hỗ trợ các thao tác ghi, tạo, xóa file/thư mục.
-* **Xử lý lỗi cơ bản:** Việc xử lý lỗi mạng (mất kết nối đột ngột) có thể chưa hoàn thiện, có thể dẫn đến treo hoặc lỗi I/O.
-* **Hiệu năng:** Tốc độ truy cập có thể chậm hơn so với truy cập trực tiếp qua SSH hoặc `sftp` do có thêm lớp FUSE.
-* **Bảo mật:** Cẩn thận khi sử dụng tùy chọn `pass=` trên dòng lệnh. Luôn ưu tiên sử dụng xác thực bằng khóa SSH.
-* **Tính tương thích:** Mặc dù mục tiêu là `/proc`, một số file hoặc thư mục đặc biệt trong `/proc` với hành vi không chuẩn có thể không hoạt động hoàn hảo.
+- `-f`: Chạy ở chế độ foreground (xem log trực tiếp)
+- `-d`: Chế độ debug với nhiều thông tin hơn
+- `-o allow_other`: Cho phép các người dùng khác truy cập vào mount point
+- `-o default_permissions`: Áp dụng kiểm tra quyền truy cập chuẩn
+
+### Các công cụ hỗ trợ
+
+RemoteFS cung cấp các công cụ bổ sung để làm việc với hệ thống file từ xa:
+
+#### remote-cp: Sao chép file giữa hệ thống cục bộ và từ xa
+
+```bash
+remote-cp [options] <source> <destination>
+```
+
+Ví dụ:
+```bash
+# Sao chép file từ máy cục bộ lên máy từ xa
+remote-cp localfile.txt /mnt/remote/path/
+
+# Sao chép file từ máy từ xa về máy cục bộ
+remote-cp /mnt/remote/file.txt ./
+
+# Sao chép và đổi tên file
+remote-cp file1.txt /mnt/remote/file2.txt
+```
+
+Tùy chọn:
+- `-v, --verbose`: Hiển thị thông tin chi tiết
+- `-r, --recursive`: Sao chép thư mục và nội dung bên trong (chưa hỗ trợ đầy đủ)
+- `-h, --help`: Hiển thị trợ giúp
+
+#### remote-mv: Di chuyển file giữa hệ thống cục bộ và từ xa
+
+```bash
+remote-mv [options] <source> <destination>
+```
+
+Ví dụ:
+```bash
+# Di chuyển file từ máy cục bộ lên máy từ xa
+remote-mv localfile.txt /mnt/remote/path/
+
+# Di chuyển file từ máy từ xa về máy cục bộ
+remote-mv /mnt/remote/file.txt ./
+
+# Di chuyển và đổi tên file
+remote-mv file1.txt /mnt/remote/file2.txt
+```
+
+Tùy chọn:
+- `-v, --verbose`: Hiển thị thông tin chi tiết
+- `-h, --help`: Hiển thị trợ giúp
+
+### Cách unmount
+
+```bash
+fusermount3 -u ~/remote_mount
+```
+
+## Ví dụ thực tế
+
+### Truy cập thư mục home từ xa
+```bash
+remotefs ~/remote_home -o host=myserver.com -o user=john -o key=~/.ssh/id_rsa -o remotepath=/home/john
+```
+
+### Chỉnh sửa file cấu hình từ xa với VS Code
+```bash
+# Sau khi mount
+code ~/remote_mount/etc/config.conf
+```
+
+### Sao chép dữ liệu từ máy cục bộ lên máy chủ từ xa
+```bash
+cp ~/documents/report.pdf ~/remote_mount/documents/
+```
+
+### Tìm kiếm trên hệ thống file từ xa
+```bash
+find ~/remote_mount -name "*.log" -type f -mtime -7
+```
+
+### Xem log hệ thống từ xa
+```bash
+tail -f ~/remote_mount/var/log/syslog
+```
+
+## Khắc phục sự cố
+
+### Các vấn đề thường gặp
+
+1. **Lỗi "Transport endpoint is not connected"**
+   - Kiểm tra kết nối mạng
+   - Xác nhận máy chủ SSH đang hoạt động
+   - Thử unmount và mount lại
+
+2. **Không thể ghi file**
+   - Kiểm tra quyền truy cập trên máy chủ từ xa
+   - Đảm bảo không mount với tùy chọn readonly
+   - Kiểm tra quota và dung lượng ổ đĩa
+
+3. **Hiệu suất chậm**
+   - Giảm độ trễ mạng nếu có thể
+   - Sử dụng compression: thêm `-o compression=yes`
+   - Tăng kích thước cache: thêm `-o cache_timeout=600`
+
+## Giới hạn hiện tại
+
+- Hiệu suất có thể bị ảnh hưởng bởi tốc độ mạng và độ trễ
+- Không hỗ trợ các thao tác nguyên tử đặc biệt
+- Trường hợp cắt ngắn file (truncate) phức tạp có thể không hoạt động tốt với một số trình soạn thảo
+- Có thể mất kết nối nếu phiên SSH bị ngắt đột ngột
+
+## Bảo mật
+
+- **KHÔNG** sử dụng tùy chọn `pass=` trên dòng lệnh trong môi trường sản xuất vì mật khẩu sẽ hiển thị trong lịch sử lệnh và ps
+- Luôn sử dụng xác thực khóa SSH khi có thể
+- Cân nhắc sử dụng mount ở chế độ chỉ đọc nếu không cần chỉnh sửa
+- Giới hạn quyền truy cập vào mount point (chmod 700)
+
+## Đóng góp
+
+Đóng góp luôn được hoan nghênh! Nếu bạn muốn cải thiện RemoteFS:
+
+1. Fork repository
+2. Tạo nhánh tính năng (`git checkout -b feature/amazing-feature`)
+3. Commit thay đổi (`git commit -m 'Add some amazing feature'`)
+4. Push lên nhánh (`git push origin feature/amazing-feature`)
+5. Mở Pull Request
+
+## Giấy phép
+
+Dự án này được phân phối dưới giấy phép MIT. Xem file `LICENSE` để biết thêm chi tiết.
+
+## Tác giả
+
+- **Tên của bạn** - [GitHub](https://github.com/yourusername)
+
+## Lời cảm ơn
+
+- Dự án FUSE vì đã tạo ra một framework tuyệt vời
+- Libssh2 vì đã cung cấp API SSH/SFTP đáng tin cậy
+- Cộng đồng nguồn mở vì những đóng góp và phản hồi quý báu

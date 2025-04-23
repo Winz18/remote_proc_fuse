@@ -248,27 +248,43 @@ int rp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
 int rp_open(const char *path, struct fuse_file_info *fi) {
     LOG_DEBUG("open: %s (flags: 0x%x)", path, fi->flags);
 
-    // Chỉ cho phép đọc
-    if ((fi->flags & O_ACCMODE) != O_RDONLY) {
-        LOG_ERR("open: Write access denied for %s", path);
-        return -EACCES;
-    }
-
     char *remote_path = build_remote_path(path);
     if (!remote_path) return -ENOMEM;
 
-    // Mở file trên remote
-    // Mode 0 không quan trọng vì chỉ đọc
-    LIBSSH2_SFTP_HANDLE *handle = sftp_open_remote(remote_path, fi->flags, 0);
+    // Mở file trên remote với các flag thích hợp
+    LIBSSH2_SFTP_HANDLE *handle;
+    
+    // Kiểm tra nếu là mở để ghi hoặc đọc+ghi
+    if ((fi->flags & O_ACCMODE) == O_WRONLY || (fi->flags & O_ACCMODE) == O_RDWR) {
+        unsigned long sftp_flags = 0;
+        
+        // Chuyển đổi flags từ POSIX sang SFTP
+        if ((fi->flags & O_ACCMODE) == O_WRONLY)
+            sftp_flags |= LIBSSH2_FXF_WRITE;
+        else if ((fi->flags & O_ACCMODE) == O_RDWR)
+            sftp_flags |= LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE;
+            
+        // Các flags khác
+        if (fi->flags & O_APPEND)
+            sftp_flags |= LIBSSH2_FXF_APPEND;
+        
+        // Không thêm O_CREAT/O_TRUNC ở đây vì FUSE sẽ gọi create() trước khi mở
+        
+        handle = sftp_open_remote(remote_path, sftp_flags, 0);
+    } else {
+        // Mở file chỉ đọc (giữ nguyên code cũ)
+        handle = sftp_open_remote(remote_path, fi->flags, 0);
+    }
+    
     free(remote_path);
 
     if (!handle) {
         remote_conn_info_t *conn = get_conn_info();
         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
-        int err = sftp_error_to_errno(sftp_err); // <<< SỬ DỤNG HELPER
+        int err = sftp_error_to_errno(sftp_err);
    
         // Xử lý thêm trường hợp đặc biệt: nếu lỗi là EACCES nhưng cố mở thư mục -> EISDIR
-        if (err == EACCES || err == EINVAL) { // SFTP có thể trả về PERMISSION_DENIED hoặc INVALID_PARAMETER/FAILURE khi mở dir
+        if (err == EACCES || err == EINVAL) {
             // Thử stat lại để chắc chắn đó là thư mục
             LIBSSH2_SFTP_ATTRIBUTES attrs;
             char *r_path_stat = build_remote_path(path);
@@ -283,18 +299,37 @@ int rp_open(const char *path, struct fuse_file_info *fi) {
         return -err ? -err : -EIO;
     }
 
-    // Lưu handle vào fi->fh để dùng trong read/release
-    // fi->fh là uint64_t, handle là con trỏ -> ép kiểu
+    // Lưu handle vào fi->fh để dùng trong read/write/release
     fi->fh = (uint64_t)handle;
     LOG_DEBUG("open OK for %s, handle stored: %p", path, handle);
-
-    // Tùy chọn: Tắt cache kernel cho file này nếu muốn luôn mới
-    // fi->keep_cache = 0; // Không cache nội dung
-    // fi->direct_io = 1; // Sử dụng direct I/O (có thể chậm hơn)
 
     return 0; // Thành công
 }
 
+int rp_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
+    LOG_DEBUG("create: %s (mode: %o)", path, mode);
+    
+    char *remote_path = build_remote_path(path);
+    if (!remote_path) return -ENOMEM;
+    
+    // Tạo file mới trên remote
+    LIBSSH2_SFTP_HANDLE *handle = sftp_create_remote(remote_path, mode);
+    free(remote_path);
+    
+    if (!handle) {
+        remote_conn_info_t *conn = get_conn_info();
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err);
+        LOG_ERR("create: sftp_create_remote failed for %s, sftp_err=%lu -> errno=%d", path, sftp_err, err);
+        return -err ? -err : -EIO;
+    }
+    
+    // Lưu handle vào fi->fh để dùng trong write/release
+    fi->fh = (uint64_t)handle;
+    LOG_DEBUG("create OK for %s, handle stored: %p", path, handle);
+    
+    return 0; // Thành công
+}
 
 int rp_read(const char *path, char *buf, size_t size, off_t offset,
             struct fuse_file_info *fi)
@@ -331,6 +366,31 @@ int rp_read(const char *path, char *buf, size_t size, off_t offset,
     return (int)bytes_read; // Trả về số byte đã đọc
 }
 
+int rp_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
+    LOG_DEBUG("write: %s (size: %zu, offset: %ld)", path, size, offset);
+    
+    LIBSSH2_SFTP_HANDLE *handle = (LIBSSH2_SFTP_HANDLE *)fi->fh;
+    if (!handle) {
+        LOG_ERR("write: Invalid SFTP handle for %s", path);
+        return -EBADF; // Bad file descriptor
+    }
+    
+    // Nếu offset > 0, cần seek trước khi ghi
+    if (offset > 0) {
+        LOG_DEBUG("write: Seeking to offset %ld", offset);
+        libssh2_sftp_seek64(handle, offset);
+    }
+    
+    ssize_t bytes_written = sftp_write_remote(handle, buf, size);
+    
+    if (bytes_written < 0) {
+        LOG_ERR("write: sftp_write_remote failed for %s (error code: %zd)", path, bytes_written);
+        return (int)bytes_written; // Trả về mã lỗi âm đã nhận
+    }
+    
+    LOG_DEBUG("write OK for %s: %zd bytes written", path, bytes_written);
+    return (int)bytes_written; // Trả về số byte đã ghi
+}
 
 int rp_release(const char *path, struct fuse_file_info *fi) {
     LOG_DEBUG("release: %s", path);
@@ -347,13 +407,7 @@ int rp_release(const char *path, struct fuse_file_info *fi) {
 
 int rp_access(const char *path, int mask) {
      LOG_DEBUG("access: %s (mask: %d)", path, mask);
-     // access() dùng để kiểm tra quyền *trước* khi mở file.
-     // Cách đơn giản là gọi getattr và kiểm tra mode.
-     // Cách phức tạp hơn là dùng libssh2_sftp_access (nếu server hỗ trợ).
-     // Tạm thời, cứ dựa vào kết quả của open/read/readdir để báo lỗi.
-     // Hoặc luôn trả về 0 nếu muốn đơn giản hóa.
-     // return 0;
-
+     
      // Gọi getattr để kiểm tra sự tồn tại và quyền cơ bản
      struct stat stbuf;
      int res = rp_getattr(path, &stbuf, NULL);
@@ -362,44 +416,271 @@ int rp_access(const char *path, int mask) {
      }
 
      // Kiểm tra quyền dựa trên mask (R_OK, W_OK, X_OK)
-     // Vì là read-only, chỉ cần kiểm tra R_OK (và X_OK cho dir)
      mode_t mode = stbuf.st_mode;
      uid_t uid = getuid(); // Người dùng chạy FUSE
      gid_t gid = getgid();
 
      if (mask == F_OK) return 0; // Chỉ kiểm tra tồn tại
 
-     if (mask & W_OK) return -EACCES; // Không cho phép ghi
+     // Cho phép kiểm tra quyền ghi - không từ chối mặc định
+     if (mask & W_OK) {
+         if (!((mode & S_IWUSR) && (stbuf.st_uid == uid)) &&
+             !((mode & S_IWGRP) && (stbuf.st_gid == gid)) && 
+             !((mode & S_IWOTH))) {
+              LOG_DEBUG("access: Write permission denied for %s", path);
+              return -EACCES;
+         }
+     }
 
      if (mask & R_OK) {
          if (!((mode & S_IRUSR) && (stbuf.st_uid == uid)) &&
-             !((mode & S_IRGRP) && (stbuf.st_gid == gid)) && // Giả định user thuộc group này
+             !((mode & S_IRGRP) && (stbuf.st_gid == gid)) && 
              !((mode & S_IROTH))) {
               LOG_DEBUG("access: Read permission denied for %s", path);
               return -EACCES;
          }
      }
 
-      if (mask & X_OK) {
-          // Chỉ kiểm tra execute cho thư mục (nghĩa là có thể cd vào)
-         if (!S_ISDIR(mode)) return -EACCES; // Không thể execute file thường
-         if (!((mode & S_IXUSR) && (stbuf.st_uid == uid)) &&
-             !((mode & S_IXGRP) && (stbuf.st_gid == gid)) &&
-             !((mode & S_IXOTH))) {
-              LOG_DEBUG("access: Execute (directory access) permission denied for %s", path);
-              return -EACCES;
+     if (mask & X_OK) {
+         if (!S_ISDIR(mode)) {
+             // Kiểm tra quyền execute cho file thường
+             if (!((mode & S_IXUSR) && (stbuf.st_uid == uid)) &&
+                 !((mode & S_IXGRP) && (stbuf.st_gid == gid)) &&
+                 !((mode & S_IXOTH))) {
+                 LOG_DEBUG("access: Execute permission denied for %s", path);
+                 return -EACCES;
+             }
+         } else { 
+             // Kiểm tra quyền execute cho thư mục (có thể cd vào)
+             if (!((mode & S_IXUSR) && (stbuf.st_uid == uid)) &&
+                 !((mode & S_IXGRP) && (stbuf.st_gid == gid)) &&
+                 !((mode & S_IXOTH))) {
+                 LOG_DEBUG("access: Directory access permission denied for %s", path);
+                 return -EACCES;
+             }
          }
-      }
+     }
 
      return 0; // Có quyền truy cập theo mask yêu cầu
 }
 
+int rp_truncate(const char *path, off_t size, struct fuse_file_info *fi) {
+    LOG_DEBUG("truncate: %s (size: %ld)", path, size);
+    
+    // Trường hợp 1: Truncate với file handle (ftruncate)
+    if (fi && fi->fh) {
+        LIBSSH2_SFTP_HANDLE *handle = (LIBSSH2_SFTP_HANDLE *)fi->fh;
+        
+        // Đối với truncate với kích thước 0, chỉ cần đóng và mở lại file với cờ TRUNC
+        if (size == 0) {
+            // Lưu lại đường dẫn remote
+            char *remote_path = build_remote_path(path);
+            if (!remote_path) return -ENOMEM;
+            
+            // Đóng handle hiện tại
+            sftp_close_remote(handle);
+            fi->fh = 0;
+            
+            // Mở lại với cờ TRUNC
+            remote_conn_info_t *conn = get_conn_info();
+            unsigned long flags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_TRUNC;
+            
+            LIBSSH2_SFTP_HANDLE *new_handle = libssh2_sftp_open_ex(
+                conn->sftp_session, 
+                remote_path, 
+                strlen(remote_path), 
+                flags, 
+                0644, 
+                LIBSSH2_SFTP_OPENFILE
+            );
+            
+            free(remote_path);
+            
+            if (!new_handle) {
+                LOG_ERR("truncate: Failed to reopen file with TRUNC flag: %s", path);
+                return -EIO;
+            }
+            
+            // Lưu handle mới vào fi->fh
+            fi->fh = (uint64_t)new_handle;
+            return 0;
+        }
+        
+        // Xử lý truncate với kích thước không phải 0
+        // 1. Cần đóng handle hiện tại
+        // 2. Mở file để đọc
+        // 3. Đọc nội dung cần giữ lại
+        // 4. Mở lại file với cờ TRUNC
+        // 5. Ghi lại nội dung đã đọc
+        
+        char *remote_path = build_remote_path(path);
+        if (!remote_path) return -ENOMEM;
+        
+        // Đóng handle hiện tại
+        sftp_close_remote(handle);
+        fi->fh = 0;
+        
+        // Thực hiện truncate thông qua đường dẫn
+        int result = sftp_truncate_remote(remote_path, size);
+        free(remote_path);
+        
+        if (result != 0) {
+            LOG_ERR("truncate (with handle): sftp_truncate_remote failed: %d", result);
+            return -EIO;
+        }
+        
+        // Mở lại file 
+        remote_path = build_remote_path(path);
+        if (!remote_path) return -ENOMEM;
+        
+        remote_conn_info_t *conn = get_conn_info();
+        unsigned long open_flags = LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE;
+        
+        LIBSSH2_SFTP_HANDLE *new_handle = libssh2_sftp_open_ex(
+            conn->sftp_session, 
+            remote_path, 
+            strlen(remote_path), 
+            open_flags, 
+            0644, 
+            LIBSSH2_SFTP_OPENFILE
+        );
+        
+        free(remote_path);
+        
+        if (!new_handle) {
+            LOG_ERR("truncate: Failed to reopen file after truncate: %s", path);
+            return -EIO;
+        }
+        
+        // Lưu handle mới vào fi->fh
+        fi->fh = (uint64_t)new_handle;
+        return 0;
+    }
+    
+    // Trường hợp 2: Truncate thông qua đường dẫn (không có file handle)
+    char *remote_path = build_remote_path(path);
+    if (!remote_path) return -ENOMEM;
+    
+    int rc = sftp_truncate_remote(remote_path, size);
+    free(remote_path);
+    
+    if (rc != 0) {
+        LOG_ERR("truncate: sftp_truncate_remote failed for %s: %d", path, rc);
+        return -EIO;
+    }
+    
+    LOG_DEBUG("truncate OK for %s (new size: %ld)", path, size);
+    return 0;
+}
+
+int rp_unlink(const char *path) {
+    LOG_DEBUG("unlink: %s", path);
+    
+    char *remote_path = build_remote_path(path);
+    if (!remote_path) return -ENOMEM;
+    
+    // Xóa file từ xa
+    int rc = sftp_unlink_remote(remote_path);
+    free(remote_path);
+    
+    if (rc != 0) {
+        remote_conn_info_t *conn = get_conn_info();
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err);
+        LOG_ERR("unlink: sftp_unlink_remote failed for %s, sftp_err=%lu -> errno=%d", path, sftp_err, err);
+        return -err ? -err : -EIO;
+    }
+    
+    LOG_DEBUG("unlink OK for %s", path);
+    return 0; // Thành công
+}
+
+int rp_mkdir(const char *path, mode_t mode) {
+    LOG_DEBUG("mkdir: %s (mode: %o)", path, mode);
+    
+    char *remote_path = build_remote_path(path);
+    if (!remote_path) return -ENOMEM;
+    
+    // Tạo thư mục từ xa
+    int rc = sftp_mkdir_remote(remote_path, mode);
+    free(remote_path);
+    
+    if (rc != 0) {
+        remote_conn_info_t *conn = get_conn_info();
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err);
+        LOG_ERR("mkdir: sftp_mkdir_remote failed for %s, sftp_err=%lu -> errno=%d", path, sftp_err, err);
+        return -err ? -err : -EIO;
+    }
+    
+    LOG_DEBUG("mkdir OK for %s", path);
+    return 0; // Thành công
+}
+
+int rp_rmdir(const char *path) {
+    LOG_DEBUG("rmdir: %s", path);
+    
+    char *remote_path = build_remote_path(path);
+    if (!remote_path) return -ENOMEM;
+    
+    // Xóa thư mục từ xa
+    int rc = sftp_rmdir_remote(remote_path);
+    free(remote_path);
+    
+    if (rc != 0) {
+        remote_conn_info_t *conn = get_conn_info();
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err);
+        LOG_ERR("rmdir: sftp_rmdir_remote failed for %s, sftp_err=%lu -> errno=%d", path, sftp_err, err);
+        return -err ? -err : -EIO;
+    }
+    
+    LOG_DEBUG("rmdir OK for %s", path);
+    return 0; // Thành công
+}
+
+int rp_rename(const char *from, const char *to, unsigned int flags) {
+    LOG_DEBUG("rename: %s -> %s (flags: %u)", from, to, flags);
+    
+    // Kiểm tra flags nâng cao (FUSE 3)
+    if (flags) {
+        return -EINVAL; // Không hỗ trợ flags đặc biệt như RENAME_NOREPLACE, RENAME_EXCHANGE
+    }
+    
+    char *remote_from = build_remote_path(from);
+    if (!remote_from) return -ENOMEM;
+    
+    char *remote_to = build_remote_path(to);
+    if (!remote_to) {
+        free(remote_from);
+        return -ENOMEM;
+    }
+    
+    // libssh2 không có hàm rename, nhưng SFTP v3+ hỗ trợ
+    remote_conn_info_t *conn = get_conn_info();
+    if (!conn || !conn->sftp_session) {
+        free(remote_from);
+        free(remote_to);
+        return -ENOTCONN;
+    }
+    
+    int rc = libssh2_sftp_rename_ex(conn->sftp_session, 
+                                    remote_from, strlen(remote_from),
+                                    remote_to, strlen(remote_to),
+                                    LIBSSH2_SFTP_RENAME_OVERWRITE);
+    
+    free(remote_from);
+    free(remote_to);
+    
+    if (rc != 0) {
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err);
+        LOG_ERR("rename: libssh2_sftp_rename_ex failed, rc=%d, sftp_err=%lu -> errno=%d", rc, sftp_err, err);
+        return -err ? -err : -EIO;
+    }
+    
+    LOG_DEBUG("rename OK: %s -> %s", from, to);
+    return 0; // Thành công
+}
+
 // --- Các hàm không hỗ trợ khác ---
-// static int rp_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) { return -EROFS; } // Read Only FS
-// static int rp_create(const char *path, mode_t mode, struct fuse_file_info *fi) { return -EROFS; }
-// static int rp_unlink(const char *path) { return -EROFS; }
-// static int rp_mkdir(const char *path, mode_t mode) { return -EROFS; }
-// static int rp_rmdir(const char *path) { return -EROFS; }
-// static int rp_truncate(const char *path, off_t size) { return -EROFS; }
-// static int rp_rename(const char *from, const char *to, unsigned int flags) { return -EROFS; }
-// ...

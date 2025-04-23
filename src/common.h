@@ -30,6 +30,7 @@ static inline remote_conn_info_t* get_conn_info() {
 
 // Macro tiện ích cho logging (in ra stderr để xem khi chạy FUSE với -f)
 #define LOG_ERR(fmt, ...) fprintf(stderr, "[ERROR] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...) fprintf(stderr, "[WARNING] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...) fprintf(stderr, "[INFO] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) fprintf(stderr, "[DEBUG] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__) // Chỉ hiện khi biên dịch với DEBUG flag
 

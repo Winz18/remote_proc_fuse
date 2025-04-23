@@ -38,8 +38,14 @@ int rp_release(const char *path, struct fuse_file_info *fi);
 
 // Các thao tác khác (không hỗ trợ)
 int rp_access(const char *path, int mask);
-// int rp_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
-// int rp_create(const char *path, mode_t mode, struct fuse_file_info *fi);
-// ... các hàm khác trả về -ENOSYS hoặc -EACCES
+
+// Các thao tác ghi, tạo, xóa file/thư mục
+int rp_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
+int rp_create(const char *path, mode_t mode, struct fuse_file_info *fi);
+int rp_unlink(const char *path);
+int rp_mkdir(const char *path, mode_t mode);
+int rp_rmdir(const char *path);
+int rp_truncate(const char *path, off_t size, struct fuse_file_info *fi);
+int rp_rename(const char *from, const char *to, unsigned int flags);
 
 #endif // REMOTE_PROC_FUSE_H

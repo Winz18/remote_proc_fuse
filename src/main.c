@@ -3,10 +3,13 @@
 #include "common.h"
 #include "remote_proc_fuse.h"
 #include "ssh_sftp_client.h" // Cần để truy cập struct conn info
+#include "mount_config.h"    // Thêm header cho config mount
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h> // getopt
+#include <libgen.h> // realpath
+#include <limits.h> // PATH_MAX
 
 // Cấu trúc lưu trữ các đối số dòng lệnh tùy chỉnh
 struct fuse_args cli_args = FUSE_ARGS_INIT(0, NULL); // Cho FUSE xử lý arg của nó
@@ -23,8 +26,8 @@ remote_conn_info_t connection_info = { // Dữ liệu kết nối sẽ truyền 
 };
 
 static void show_usage(const char *progname) {
-    fprintf(stderr, "Usage: %s [FUSE options] <mountpoint> -o host=<hostname> -o user=<username> [-o port=<port>] [-o pass=<password> | -o key=<keyfile>] [-o remoteprocpath=<path>]\n\n", progname);
-    fprintf(stderr, "Mounts the /proc directory of a remote machine via SSH/SFTP.\n\n");
+    fprintf(stderr, "Usage: %s [FUSE options] <mountpoint> -o host=<hostname> -o user=<username> [-o port=<port>] [-o pass=<password> | -o key=<keyfile>] [-o remotepath=<path>]\n\n", progname);
+    fprintf(stderr, "Mounts a remote directory via SSH/SFTP.\n\n");
     fprintf(stderr, "Required FUSE options (-o):\n");
     fprintf(stderr, "  host=hostname     Hostname or IP address of the remote machine.\n");
     fprintf(stderr, "  user=username     Username for SSH login.\n");
@@ -33,10 +36,12 @@ static void show_usage(const char *progname) {
     fprintf(stderr, "  pass=password     Password for SSH login (INSECURE!).\n");
     fprintf(stderr, "  key=keyfile       Path to the private SSH key file for authentication.\n");
     fprintf(stderr, "                    (If key has passphrase, provide it with 'pass=' option).\n");
-    fprintf(stderr, "  remoteprocpath=path Base path on the remote system (default: /proc).\n");
+    fprintf(stderr, "  remotepath=path   Path to mount on the remote system (default: /).\n");
+    fprintf(stderr, "  readonly          Mount filesystem as read-only.\n");
+    fprintf(stderr, "  allow_other       Allow other users to access the filesystem.\n");
     fprintf(stderr, "\nExample:\n");
-    fprintf(stderr, "  %s /mnt/remote_proc -o host=192.168.1.100 -o user=myuser -o pass=mypassword\n", progname);
-    fprintf(stderr, "  %s /mnt/remote_proc -o host=server.com -o user=admin -o key=~/.ssh/id_rsa\n", progname);
+    fprintf(stderr, "  %s /mnt/remote -o host=192.168.1.100 -o user=myuser -o pass=mypassword -o remotepath=/home/myuser\n", progname);
+    fprintf(stderr, "  %s /mnt/remote -o host=server.com -o user=admin -o key=~/.ssh/id_rsa -o remotepath=/etc\n", progname);
     fprintf(stderr, "\nStandard FUSE options (e.g., -f for foreground, -d for debug) are also accepted.\n");
 
     // Thêm fuse_lib_help để hiển thị các tùy chọn FUSE chuẩn
@@ -66,7 +71,7 @@ static struct fuse_opt rp_opts[] = {
      { "pass=%s",    offsetof(remote_conn_info_t, remote_pass), KEY_OPT_PASS },
      { "port=%d",    offsetof(remote_conn_info_t, remote_port), KEY_OPT_PORT },
      { "key=%s",     offsetof(remote_conn_info_t, ssh_key_path), KEY_OPT_KEY },
-     { "remoteprocpath=%s", offsetof(remote_conn_info_t, remote_proc_path), KEY_OPT_REMOTEPATH },
+     { "remotepath=%s", offsetof(remote_conn_info_t, remote_proc_path), KEY_OPT_REMOTEPATH },
 
      // Các tùy chọn FUSE chuẩn (-h, --help, -V, --version)
      FUSE_OPT_KEY("-h",          KEY_HELP),
@@ -89,7 +94,7 @@ static int rp_opt_proc(void *data, const char *arg, int key, struct fuse_args *o
              return fuse_opt_add_arg(outargs, "-ho") ? -1 : 1; // -ho để fuse chỉ in help của nó
             // exit(0);
         case KEY_VERSION:
-             fprintf(stderr, "Remote Proc FUSE Filesystem version 1.0\n");
+             fprintf(stderr, "RemoteFS - FUSE-based Remote Filesystem version 1.0\n");
              // Yêu cầu FUSE hiển thị version của nó và thoát
              return fuse_opt_add_arg(outargs, "--version") ? -1 : 1;
             // exit(0);
@@ -152,17 +157,14 @@ int main(int argc, char *argv[]) {
         .release    = rp_release,   // Đóng file
         .access     = rp_access,    // Kiểm tra quyền (tùy chọn)
 
-        // .lookup = rp_lookup, // FUSE 3 ít dùng, getattr là chính
-
-        // Các hàm không hỗ trợ (trả về -EROFS hoặc -ENOSYS)
-        // .write      = rp_write,
-        // .create     = rp_create,
-        // .unlink     = rp_unlink,
-        // .mkdir      = rp_mkdir,
-        // .rmdir      = rp_rmdir,
-        // .truncate   = rp_truncate,
-        // .rename     = rp_rename,
-        // ...
+        // Các hàm hỗ trợ ghi, tạo, xóa file/thư mục
+        .write      = rp_write,     // Ghi file
+        .create     = rp_create,    // Tạo file mới
+        .unlink     = rp_unlink,    // Xóa file
+        .mkdir      = rp_mkdir,     // Tạo thư mục
+        .rmdir      = rp_rmdir,     // Xóa thư mục
+        .truncate   = rp_truncate,  // Cắt ngắn file
+        .rename     = rp_rename,    // Đổi tên file/thư mục
     };
 
     // Phân tích đối số dòng lệnh sử dụng fuse_opt_parse
@@ -177,9 +179,9 @@ int main(int argc, char *argv[]) {
 
     // Gán giá trị mặc định cho remote_proc_path nếu chưa được đặt, và cấp phát động
     if (!connection_info.remote_proc_path) {
-        connection_info.remote_proc_path = strdup("/proc");
+        connection_info.remote_proc_path = strdup("/");
         if (!connection_info.remote_proc_path) {
-             perror("strdup failed for default remote_proc_path");
+             perror("strdup failed for default remote path");
              fuse_opt_free_args(&args);
              // Giải phóng các cái đã strdup khác nếu có
              free(connection_info.remote_host);
@@ -217,7 +219,7 @@ int main(int argc, char *argv[]) {
     }
 
     // In thông tin kết nối (trừ mật khẩu)
-    LOG_INFO("Mounting remote proc filesystem:");
+    LOG_INFO("Mounting remote filesystem:");
     LOG_INFO("  Remote Host: %s", connection_info.remote_host);
     LOG_INFO("  Remote Port: %d", connection_info.remote_port);
     LOG_INFO("  Remote User: %s", connection_info.remote_user);
@@ -227,8 +229,46 @@ int main(int argc, char *argv[]) {
     } else {
         LOG_INFO("  Auth Method: Password [Provided]");
     }
-     LOG_INFO("  Remote Base Path: %s", connection_info.remote_proc_path);
-
+    LOG_INFO("  Remote Path: %s", connection_info.remote_proc_path);
+    
+    // Lấy và lưu thông tin mount point
+    // Đối số mount point là tham số không phải tùy chọn đầu tiên trong args.argv
+    int mount_point_idx = 1;  // Thường là argv[1]
+    while (mount_point_idx < args.argc) {
+        // Bỏ qua các tùy chọn
+        if (args.argv[mount_point_idx][0] == '-') {
+            mount_point_idx++;
+            // Bỏ qua cả đối số của tùy chọn nếu có
+            if (mount_point_idx < args.argc && 
+                (args.argv[mount_point_idx-1][1] == 'o' || 
+                 strncmp(args.argv[mount_point_idx-1], "--opt", 5) == 0)) {
+                mount_point_idx++;
+            }
+            continue;
+        }
+        break;  // Đã tìm thấy đối số không phải tùy chọn
+    }
+    
+    if (mount_point_idx < args.argc) {
+        char *mount_point = args.argv[mount_point_idx];
+        char real_path[PATH_MAX];
+        
+        // Lấy đường dẫn tuyệt đối
+        if (realpath(mount_point, real_path) != NULL) {
+            LOG_INFO("  Mount Point: %s", real_path);
+            
+            // Lưu thông tin mount point
+            if (save_mount_point(real_path, connection_info.remote_proc_path) != 0) {
+                LOG_WARN("Failed to save mount point information");
+            } else {
+                LOG_INFO("Saved mount point info for tools");
+            }
+        } else {
+            LOG_WARN("Could not resolve real path for mount point: %s", mount_point);
+        }
+    } else {
+        LOG_WARN("Could not determine mount point");
+    }
 
     // Gọi hàm chính của FUSE
     // Truyền con trỏ tới connection_info làm private_data
