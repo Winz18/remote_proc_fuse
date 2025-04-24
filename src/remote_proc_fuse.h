@@ -48,4 +48,6 @@ int rp_rmdir(const char *path);
 int rp_truncate(const char *path, off_t size, struct fuse_file_info *fi);
 int rp_rename(const char *from, const char *to, unsigned int flags);
 
+int rp_fsync(const char *path, int isdatasync, struct fuse_file_info *fi);
+
 #endif // REMOTE_PROC_FUSE_H

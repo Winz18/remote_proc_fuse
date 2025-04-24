@@ -188,93 +188,69 @@ int sftp_readdir_remote(LIBSSH2_SFTP_HANDLE *handle, char *buffer, size_t buffer
 
 int sftp_closedir_remote(LIBSSH2_SFTP_HANDLE *handle) {
     remote_conn_info_t *conn = get_conn_info();
-    if (!conn || !conn->sftp_session || !handle) return LIBSSH2_ERROR_BAD_USE;
+    if (!conn || !conn->sftp_session || !handle) return LIBSSH2_ERROR_BAD_USE; // Nên trả về mã lỗi âm?
 
-    LOG_DEBUG("SFTP closedir");
+    LOG_DEBUG("SFTP close (handle: %p)", handle);
     int rc = libssh2_sftp_close_handle(handle);
     if (rc != 0) {
-        LOG_ERR("libssh2_sftp_close_handle (dir) failed: %d", rc);
+         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+         int session_errno = libssh2_session_last_errno(conn->ssh_session); // Lấy lỗi session
+         char *ssh_errmsg;
+         libssh2_session_last_error(conn->ssh_session, &ssh_errmsg, NULL, 0); // Lấy thông điệp lỗi SSH
+
+         LOG_ERR("libssh2_sftp_close_handle failed: rc=%d, sftp_err=%lu, session_errno=%d, ssh_errmsg=%s",
+                 rc, sftp_err, session_errno, ssh_errmsg ? ssh_errmsg : "N/A");
+
+         // Trả về mã lỗi libssh2 hoặc mã lỗi đã ánh xạ nếu muốn
+         // return -sftp_error_to_errno(sftp_err); // Trả về errno âm
+         return rc; // Trả về mã lỗi libssh2 gốc
     }
-    return rc;
+    return rc; // Trả về 0 nếu thành công
 }
 
-LIBSSH2_SFTP_HANDLE* sftp_open_remote(const char *remote_path, unsigned long flags, long mode) {
+LIBSSH2_SFTP_HANDLE* sftp_open_remote(const char *remote_path, unsigned long sftp_flags, long mode) { 
     remote_conn_info_t *conn = get_conn_info();
     if (!conn || !conn->sftp_session) return NULL;
 
-    LOG_DEBUG("SFTP open: %s (flags: 0x%lx)", remote_path, flags);
-    
+    LOG_DEBUG("SFTP open: %s (SFTP flags: 0x%lx, mode: %lo)", remote_path, sftp_flags, mode);
+
+    // *** BỎ ĐOẠN DỊCH CỜ POSIX->SFTP Ở ĐÂY ***
+    /*
     // Xác định SFTP flags dựa trên flags POSIX
     unsigned long sftp_flags = 0;
-    
-    // Xác định quyền truy cập (READ/WRITE/READWRITE)
-    int access_mode = flags & O_ACCMODE;
-    if (access_mode == O_RDONLY) {
-        sftp_flags = LIBSSH2_FXF_READ;
-    } else if (access_mode == O_WRONLY) {
-        sftp_flags = LIBSSH2_FXF_WRITE;
-    } else if (access_mode == O_RDWR) {
-        sftp_flags = LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE;
-    }
-    
-    // Xử lý các flags khác
-    if (flags & O_CREAT) {
-        sftp_flags |= LIBSSH2_FXF_CREAT;
-        
-        if (flags & O_EXCL) {
-            // Nếu file đã tồn tại, báo lỗi
-            sftp_flags |= LIBSSH2_FXF_EXCL;
-        }
-    }
-    
-    if (flags & O_TRUNC) {
-        // Cắt ngắn nội dung file về 0 khi mở
-        sftp_flags |= LIBSSH2_FXF_TRUNC;
-    }
-    
-    if (flags & O_APPEND) {
-        // Ghi vào cuối file
-        sftp_flags |= LIBSSH2_FXF_APPEND;
-    }
-    
-    // Mở file
-    LOG_DEBUG("SFTP open with flags: 0x%lx (translated to SFTP flags: 0x%lx)", 
-             flags, sftp_flags);
-             
-    // Nếu mode không được chỉ định, sử dụng quyền mặc định
-    if (mode == 0) {
-        mode = 0644; // rw-r--r--
-    }
-    
+    // ... (toàn bộ phần dịch cờ cũ bị xóa) ...
+    */
+
+    // Nếu mode không được chỉ định (ví dụ khi mở chỉ đọc), kernel có thể truyền -1 hoặc 0.
+    // SFTP yêu cầu mode hợp lệ khi có cờ CREAT, nếu không thì không quan trọng.
+    // Tạm thời để mặc định 0644 nếu mode <= 0 và có cờ WRITE hoặc CREAT.
+    // Tuy nhiên, rp_open/rp_create nên đảm bảo truyền mode đúng.
+    // if (mode <= 0 && (sftp_flags & (LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT))) {
+    //     mode = 0644; // rw-r--r--
+    // }
+     // mode nên được truyền đúng từ rp_open/rp_create khi cần
+
     LIBSSH2_SFTP_HANDLE *handle = libssh2_sftp_open_ex(
-        conn->sftp_session, 
-        remote_path, 
+        conn->sftp_session,
+        remote_path,
         strlen(remote_path),
-        sftp_flags, 
-        mode, 
+        sftp_flags, // <-- Sử dụng trực tiếp sftp_flags đã được dịch từ rp_open
+        mode,
         LIBSSH2_SFTP_OPENFILE
     );
-    
+
     if (!handle) {
+        // Phần xử lý lỗi giữ nguyên
         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
         int err = sftp_error_to_errno(sftp_err);
-        
-        LOG_ERR("libssh2_sftp_open_ex failed for %s: %d (SFTP Error: %lu -> %s)",
-                remote_path, libssh2_session_last_errno(conn->ssh_session),
-                sftp_err, strerror(err));
-                
-        // Nếu file không tồn tại và không có flag O_CREAT
-        if (err == ENOENT && !(flags & O_CREAT)) {
-            LOG_ERR("File does not exist and O_CREAT flag not specified");
-        }
-        // Nếu không có quyền
-        else if (err == EACCES) {
-            LOG_ERR("Permission denied when opening file");
-        }
+        // Ghi log lỗi chi tiết hơn để dễ debug
+        LOG_ERR("libssh2_sftp_open_ex failed for %s with SFTP flags 0x%lx, mode %lo: SFTP Error: %lu -> errno=%d (%s)",
+                remote_path, sftp_flags, mode,
+                sftp_err, err, strerror(err));
     } else {
         LOG_DEBUG("SFTP open successful for %s, handle: %p", remote_path, handle);
     }
-    
+
     return handle;
 }
 
@@ -383,10 +359,10 @@ ssize_t sftp_write_remote(LIBSSH2_SFTP_HANDLE *handle, const char *buffer, size_
                 return -EIO;
             }
         } else if (bytes_written == 0) {
-            // Không thể ghi thêm, nhưng không phải lỗi
-            LOG_DEBUG("SFTP write: Cannot write more data, stopping");
-            break;
-        }
+	    // Không thể ghi thêm, nhưng không phải lỗi?
+	    LOG_WARN("SFTP write: libssh2_sftp_write returned 0 unexpectedly (bytes_remaining: %zu). Stopping.", bytes_remaining); // Thêm log WARN
+	    break;
+	}
         
         // Cập nhật các con trỏ và bộ đếm
         buffer_pos += bytes_written;
@@ -488,189 +464,36 @@ int sftp_rmdir_remote(const char *remote_path) {
     return rc;
 }
 
-// Cắt ngắn file từ xa
-int sftp_truncate_remote(const char *remote_path, off_t size) {
-    remote_conn_info_t *conn = get_conn_info();
-    if (!conn || !conn->sftp_session) return LIBSSH2_ERROR_SOCKET_DISCONNECT;
-
-    LOG_DEBUG("SFTP truncate: %s (size: %ld)", remote_path, size);
-    
-    // Lấy thông tin file hiện tại
-    LIBSSH2_SFTP_ATTRIBUTES attrs;
-    int stat_rc = libssh2_sftp_stat_ex(conn->sftp_session, remote_path, strlen(remote_path),
-                                      LIBSSH2_SFTP_STAT, &attrs);
-    if (stat_rc != 0) {
-        LOG_ERR("truncate: Failed to stat file: %s", remote_path);
-        return LIBSSH2_ERROR_SFTP_PROTOCOL;
-    }
-    
-    // Nếu kích thước hiện tại đã bằng kích thước yêu cầu, không cần làm gì
-    if ((attrs.flags & LIBSSH2_SFTP_ATTR_SIZE) && attrs.filesize == size) {
-        LOG_DEBUG("truncate: File size already matches requested size: %ld", size);
-        return 0;
-    }
-    
-    // Trường hợp 1: Truncate với size = 0 (xóa nội dung)
-    if (size == 0) {
-        // Mở file với flag WRITE|TRUNC để xóa nội dung
-        unsigned long flags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_TRUNC;
-        LIBSSH2_SFTP_HANDLE *handle = libssh2_sftp_open_ex(conn->sftp_session, 
-                                                          remote_path, 
-                                                          strlen(remote_path), 
-                                                          flags, 
-                                                          attrs.permissions, 
-                                                          LIBSSH2_SFTP_OPENFILE);
-        if (!handle) {
-            unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
-            LOG_ERR("truncate: Failed to open file for truncate to 0: %s (SFTP error: %lu)", 
-                   remote_path, sftp_err);
-            return LIBSSH2_ERROR_SFTP_PROTOCOL;
-        }
-        
-        // Đóng handle để áp dụng cờ TRUNC
-        int rc = libssh2_sftp_close_handle(handle);
-        if (rc != 0) {
-            LOG_ERR("truncate: Failed to close handle after truncate to 0: %d", rc);
-        }
-        return rc;
-    }
-    
-    // Trường hợp 2: Truncate với size > 0 (cắt bớt nội dung)
-    // Đọc nội dung cần giữ lại
-    LIBSSH2_SFTP_HANDLE *read_handle = libssh2_sftp_open_ex(conn->sftp_session, 
-                                                           remote_path, 
-                                                           strlen(remote_path), 
-                                                           LIBSSH2_FXF_READ, 
-                                                           0, 
-                                                           LIBSSH2_SFTP_OPENFILE);
-    if (!read_handle) {
-        LOG_ERR("truncate: Failed to open file for reading: %s", remote_path);
-        return LIBSSH2_ERROR_SFTP_PROTOCOL;
-    }
-    
-    // Cấp phát bộ nhớ cho buffer đọc file
-    char *buffer = NULL;
-    
-    // Chỉ cần đọc nếu kích thước yêu cầu nhỏ hơn kích thước hiện tại
-    if (size < attrs.filesize) {
-        buffer = malloc(size);
-        if (!buffer) {
-            LOG_ERR("truncate: Failed to allocate buffer: %s", strerror(errno));
-            libssh2_sftp_close_handle(read_handle);
-            return -ENOMEM;
-        }
-        
-        // Đọc dữ liệu cần giữ lại
-        ssize_t bytes_read = 0;
-        size_t total_read = 0;
-        
-        while (total_read < size) {
-            bytes_read = libssh2_sftp_read(read_handle, buffer + total_read, size - total_read);
-            if (bytes_read <= 0) {
-                // Error or EOF
-                if (bytes_read < 0) {
-                    LOG_ERR("truncate: Error reading file: %zd", bytes_read);
-                    free(buffer);
-                    libssh2_sftp_close_handle(read_handle);
-                    return LIBSSH2_ERROR_SFTP_PROTOCOL;
-                }
-                break; // EOF
-            }
-            total_read += bytes_read;
-        }
-        
-        // Lưu lại số byte thực tế đã đọc
-        size = total_read;
-    } else {
-        // Nếu kích thước yêu cầu >= kích thước hiện tại, không cần đọc
-        // Nhưng vẫn cần mở lại file với flag TRUNC để duy trì tính nhất quán
-        buffer = malloc(attrs.filesize);
-        if (!buffer) {
-            LOG_ERR("truncate: Failed to allocate buffer: %s", strerror(errno));
-            libssh2_sftp_close_handle(read_handle);
-            return -ENOMEM;
-        }
-        
-        ssize_t bytes_read = 0;
-        size_t total_read = 0;
-        
-        while (total_read < attrs.filesize) {
-            bytes_read = libssh2_sftp_read(read_handle, buffer + total_read, attrs.filesize - total_read);
-            if (bytes_read <= 0) break; // Error or EOF
-            total_read += bytes_read;
-        }
-        
-        size = total_read;
-    }
-    
-    // Đóng handle đọc
-    libssh2_sftp_close_handle(read_handle);
-    
-    // Nếu không có dữ liệu đọc được (có thể do file rỗng), chỉ cần trả về thành công
-    if (size == 0) {
-        free(buffer);
-        return 0;
-    }
-    
-    // Mở lại file để ghi với flag TRUNC
-    LIBSSH2_SFTP_HANDLE *write_handle = libssh2_sftp_open_ex(
-        conn->sftp_session, 
-        remote_path, 
-        strlen(remote_path), 
-        LIBSSH2_FXF_WRITE | LIBSSH2_FXF_TRUNC | LIBSSH2_FXF_CREAT, 
-        attrs.permissions, 
-        LIBSSH2_SFTP_OPENFILE
-    );
-    
-    if (!write_handle) {
-        LOG_ERR("truncate: Failed to open file for writing: %s", remote_path);
-        free(buffer);
-        return LIBSSH2_ERROR_SFTP_PROTOCOL;
-    }
-    
-    // Ghi dữ liệu đã đọc vào file
-    ssize_t bytes_written = 0;
-    size_t total_written = 0;
-    
-    while (total_written < size) {
-        bytes_written = libssh2_sftp_write(write_handle, buffer + total_written, size - total_written);
-        if (bytes_written < 0) {
-            LOG_ERR("truncate: Error writing data: %zd", bytes_written);
-            free(buffer);
-            libssh2_sftp_close_handle(write_handle);
-            return LIBSSH2_ERROR_SFTP_PROTOCOL;
-        } else if (bytes_written == 0) {
-            // Không thể ghi thêm
-            break;
-        }
-        total_written += bytes_written;
-    }
-    
-    // Giải phóng bộ nhớ
-    free(buffer);
-    
-    // Đóng handle ghi
-    int rc = libssh2_sftp_close_handle(write_handle);
-    if (rc != 0) {
-        LOG_ERR("truncate: Failed to close write handle: %d", rc);
-        return rc;
-    }
-    
-    LOG_DEBUG("truncate: Successfully truncated %s to size %ld", remote_path, size);
-    return 0;
-}
-
+// Đảm bảo hàm này trong src/ssh_sftp_client.c trông như thế này
 int sftp_close_remote(LIBSSH2_SFTP_HANDLE *handle) {
     remote_conn_info_t *conn = get_conn_info();
-    if (!conn || !conn->sftp_session || !handle) return LIBSSH2_ERROR_BAD_USE;
+    // Thêm kiểm tra conn và session ngay đầu
+    if (!conn || !conn->sftp_session) {
+        LOG_ERR("sftp_close_remote: SFTP session is not valid.");
+        // Sửa mã lỗi trả về thành một mã hợp lệ
+        return LIBSSH2_ERROR_SOCKET_DISCONNECT; // Hoặc LIBSSH2_ERROR_BAD_USE
+    }
+    if (!handle) {
+         LOG_WARN("sftp_close_remote: Called with NULL handle.");
+         return LIBSSH2_ERROR_BAD_USE;
+    }
 
     LOG_DEBUG("SFTP close (handle: %p)", handle);
     int rc = libssh2_sftp_close_handle(handle);
     if (rc != 0) {
-         LOG_ERR("libssh2_sftp_close_handle (file) failed: %d (SFTP Error: %lu)",
-                 rc, libssh2_sftp_last_error(conn->sftp_session));
+         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+         int session_errno = libssh2_session_last_errno(conn->ssh_session); // Lấy lỗi session
+         char *ssh_errmsg;
+         libssh2_session_last_error(conn->ssh_session, &ssh_errmsg, NULL, 0); // Lấy thông điệp lỗi SSH
+
+         // Log lỗi chi tiết
+         LOG_ERR("libssh2_sftp_close_handle failed: rc=%d, sftp_err=%lu, session_errno=%d, ssh_errmsg=%s",
+                 rc, sftp_err, session_errno, ssh_errmsg ? ssh_errmsg : "N/A");
+
+         // Trả về mã lỗi libssh2 gốc
+         return rc;
     }
-    return rc;
+    return rc; // Trả về 0 nếu thành công
 }
 
 // Hàm chuyển đổi mã lỗi SFTP sang mã lỗi POSIX errno
@@ -911,6 +734,15 @@ int sftp_copy_remote_to_local(const char *remote_path, const char *local_path) {
 int sftp_move_local_to_remote(const char *local_path, const char *remote_path) {
     LOG_DEBUG("Move local to remote: %s -> %s", local_path, remote_path);
     
+    // Use the connection that's supplied by the calling function
+    remote_conn_info_t *conn = get_conn_info();
+    
+    // Ensure we have a valid SFTP session
+    if (!conn || !conn->sftp_session) {
+        LOG_ERR("No active SFTP connection");
+        return -ENOTCONN;
+    }
+    
     // Sao chép file
     int rc = sftp_copy_local_to_remote(local_path, remote_path);
     if (rc != 0) {
@@ -939,10 +771,12 @@ int sftp_move_remote_to_local(const char *remote_path, const char *local_path) {
     
     LOG_DEBUG("Move remote to local: %s -> %s", remote_path, local_path);
     
-    // Kết nối SFTP nếu chưa kết nối
+    // Use the connection that's supplied by the calling function
     remote_conn_info_t *conn = get_conn_info();
+    
+    // Ensure we have a valid SFTP session
     if (!conn || !conn->sftp_session) {
-        LOG_ERR("Move remote to local: No active SFTP connection");
+        LOG_ERR("No active SFTP connection");
         return -ENOTCONN;
     }
     

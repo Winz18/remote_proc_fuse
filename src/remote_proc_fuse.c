@@ -1,6 +1,11 @@
 #include "remote_proc_fuse.h"
 #include "ssh_sftp_client.h"
+#include <libssh2_sftp.h>
 #include <stdio.h> // snprintf
+#include <errno.h>
+
+// Define global ssh_cli_conn to satisfy extern in common.h
+remote_conn_info_t *ssh_cli_conn = NULL;
 
 // --- Helper Function ---
 // Tạo đường dẫn đầy đủ trên máy remote từ đường dẫn FUSE
@@ -246,57 +251,73 @@ int rp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
 }
 
 int rp_open(const char *path, struct fuse_file_info *fi) {
-    LOG_DEBUG("open: %s (flags: 0x%x)", path, fi->flags);
+    LOG_DEBUG("open: %s (POSIX flags: 0x%x)", path, fi->flags);
 
     char *remote_path = build_remote_path(path);
     if (!remote_path) return -ENOMEM;
 
-    // Mở file trên remote với các flag thích hợp
-    LIBSSH2_SFTP_HANDLE *handle;
-    
-    // Kiểm tra nếu là mở để ghi hoặc đọc+ghi
-    if ((fi->flags & O_ACCMODE) == O_WRONLY || (fi->flags & O_ACCMODE) == O_RDWR) {
-        unsigned long sftp_flags = 0;
-        
-        // Chuyển đổi flags từ POSIX sang SFTP
-        if ((fi->flags & O_ACCMODE) == O_WRONLY)
-            sftp_flags |= LIBSSH2_FXF_WRITE;
-        else if ((fi->flags & O_ACCMODE) == O_RDWR)
-            sftp_flags |= LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE;
-            
-        // Các flags khác
-        if (fi->flags & O_APPEND)
-            sftp_flags |= LIBSSH2_FXF_APPEND;
-        
-        // Không thêm O_CREAT/O_TRUNC ở đây vì FUSE sẽ gọi create() trước khi mở
-        
-        handle = sftp_open_remote(remote_path, sftp_flags, 0);
-    } else {
-        // Mở file chỉ đọc (giữ nguyên code cũ)
-        handle = sftp_open_remote(remote_path, fi->flags, 0);
+    // *** THỰC HIỆN DỊCH CỜ POSIX -> SFTP Ở ĐÂY ***
+    unsigned long sftp_flags = 0;
+    int access_mode = fi->flags & O_ACCMODE;
+
+    if (access_mode == O_RDONLY) {
+        sftp_flags |= LIBSSH2_FXF_READ;
+    } else if (access_mode == O_WRONLY) {
+        sftp_flags |= LIBSSH2_FXF_WRITE;
+    } else if (access_mode == O_RDWR) {
+        sftp_flags |= LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE;
     }
-    
+
+    // Kiểm tra các cờ khác được truyền từ kernel trong fi->flags
+    if (fi->flags & O_APPEND) {
+        sftp_flags |= LIBSSH2_FXF_APPEND;
+    }
+    if (fi->flags & O_TRUNC) {
+        // Chỉ thêm TRUNC nếu file được mở để ghi
+        if (access_mode == O_WRONLY || access_mode == O_RDWR) {
+             sftp_flags |= LIBSSH2_FXF_TRUNC;
+             LOG_DEBUG("  O_TRUNC detected, adding LIBSSH2_FXF_TRUNC");
+        } else {
+             LOG_WARN("  O_TRUNC ignored because file is opened read-only");
+        }
+    }
+    // O_CREAT và O_EXCL được xử lý bởi hàm rp_create, không cần thêm ở đây.
+    // Nếu rp_create không được gọi mà rp_open có O_CREAT thì FUSE có lỗi?
+    // Thông thường FUSE sẽ gọi create() nếu có O_CREAT.
+
+    // Lấy mode từ đâu? FUSE không truyền mode vào open.
+    // Mode chỉ quan trọng khi tạo file (rp_create).
+    // Khi mở file đã tồn tại, mode trong open_ex thường bị bỏ qua.
+    // Đặt mode là 0 khi gọi sftp_open_remote từ đây.
+    long open_mode = 0;
+    // *** KẾT THÚC DỊCH CỜ ***
+
+
+    // Gọi sftp_open_remote với cờ SFTP đã dịch
+    LIBSSH2_SFTP_HANDLE *handle = sftp_open_remote(remote_path, sftp_flags, open_mode); // <-- Truyền sftp_flags
+
     free(remote_path);
 
+    // Phần xử lý lỗi khi handle NULL giữ nguyên như cũ
     if (!handle) {
         remote_conn_info_t *conn = get_conn_info();
         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
         int err = sftp_error_to_errno(sftp_err);
-   
-        // Xử lý thêm trường hợp đặc biệt: nếu lỗi là EACCES nhưng cố mở thư mục -> EISDIR
-        if (err == EACCES || err == EINVAL) {
-            // Thử stat lại để chắc chắn đó là thư mục
+
+        // Kiểm tra lại lỗi EISDIR
+        if (err == EACCES || err == EINVAL || err == EIO || err == ENOSYS) {
             LIBSSH2_SFTP_ATTRIBUTES attrs;
             char *r_path_stat = build_remote_path(path);
+            // Thêm kiểm tra r_path_stat != NULL
             if(r_path_stat && sftp_stat_remote(r_path_stat, &attrs) == 0 && S_ISDIR(attrs.permissions)) {
                 free(r_path_stat);
-                LOG_ERR("open: Attempted to open a directory: %s", path);
+                LOG_ERR("open: Attempted to open a directory with flags 0x%x: %s", fi->flags, path);
                 return -EISDIR; // Là thư mục
             }
-            free(r_path_stat);
+            free(r_path_stat); // Giải phóng dù có thành công hay không
         }
-        LOG_ERR("open: sftp_open_remote failed for %s, sftp_err=%lu -> errno=%d", path, sftp_err, err);
-        return -err ? -err : -EIO;
+        LOG_ERR("open: sftp_open_remote failed for %s with SFTP flags 0x%lx, sftp_err=%lu -> errno=%d", path, sftp_flags, sftp_err, err);
+        return -err ? -err : -EIO; // Trả về lỗi đã map hoặc EIO
     }
 
     // Lưu handle vào fi->fh để dùng trong read/write/release
@@ -393,16 +414,26 @@ int rp_write(const char *path, const char *buf, size_t size, off_t offset, struc
 }
 
 int rp_release(const char *path, struct fuse_file_info *fi) {
-    LOG_DEBUG("release: %s", path);
+    LOG_DEBUG("release: %s", path ? path : "N/A"); // Thêm kiểm tra path NULL
     LIBSSH2_SFTP_HANDLE *handle = (LIBSSH2_SFTP_HANDLE *)fi->fh;
+    int ret = 0; // Mặc định thành công
+
     if (handle) {
         LOG_DEBUG("release: Closing SFTP handle %p", handle);
-        sftp_close_remote(handle);
-        fi->fh = 0; // Đặt lại handle về 0
+        // Gọi sftp_close_remote và kiểm tra kết quả trả về (0 là OK, <0 là lỗi libssh2)
+        int close_rc = sftp_close_remote(handle);
+        if (close_rc != 0) {
+            // Nếu đóng lỗi, ghi log và đặt mã lỗi trả về cho FUSE
+            // Log lỗi chi tiết đã có trong sftp_close_remote
+            LOG_ERR("release: sftp_close_remote reported failure for %s with libssh2_rc=%d. Reporting EIO to FUSE.", path ? path : "N/A", close_rc);
+            ret = -EIO; // <<< QUAN TRỌNG: Đặt mã lỗi trả về
+        }
+        fi->fh = 0; // Đặt lại handle về 0 dù thành công hay thất bại
     } else {
-         LOG_DEBUG("release: No SFTP handle to close for %s", path);
+         LOG_DEBUG("release: No SFTP handle to close for %s", path ? path : "N/A");
     }
-    return 0; // Release thường không trả về lỗi
+    // Trả về 0 nếu thành công, hoặc -EIO nếu sftp_close_remote thất bại
+    return ret; // <<< QUAN TRỌNG: Trả về biến ret này
 }
 
 int rp_access(const char *path, int mask) {
@@ -464,137 +495,6 @@ int rp_access(const char *path, int mask) {
      return 0; // Có quyền truy cập theo mask yêu cầu
 }
 
-int rp_truncate(const char *path, off_t size, struct fuse_file_info *fi) {
-    LOG_DEBUG("truncate: %s (size: %ld)", path, size);
-    
-    // Trường hợp 1: Truncate với file handle (ftruncate)
-    if (fi && fi->fh) {
-        LIBSSH2_SFTP_HANDLE *handle = (LIBSSH2_SFTP_HANDLE *)fi->fh;
-        
-        // Đối với truncate với kích thước 0, chỉ cần đóng và mở lại file với cờ TRUNC
-        if (size == 0) {
-            // Lưu lại đường dẫn remote
-            char *remote_path = build_remote_path(path);
-            if (!remote_path) return -ENOMEM;
-            
-            // Đóng handle hiện tại
-            sftp_close_remote(handle);
-            fi->fh = 0;
-            
-            // Mở lại với cờ TRUNC
-            remote_conn_info_t *conn = get_conn_info();
-            unsigned long flags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_TRUNC;
-            
-            LIBSSH2_SFTP_HANDLE *new_handle = libssh2_sftp_open_ex(
-                conn->sftp_session, 
-                remote_path, 
-                strlen(remote_path), 
-                flags, 
-                0644, 
-                LIBSSH2_SFTP_OPENFILE
-            );
-            
-            free(remote_path);
-            
-            if (!new_handle) {
-                LOG_ERR("truncate: Failed to reopen file with TRUNC flag: %s", path);
-                return -EIO;
-            }
-            
-            // Lưu handle mới vào fi->fh
-            fi->fh = (uint64_t)new_handle;
-            return 0;
-        }
-        
-        // Xử lý truncate với kích thước không phải 0
-        // 1. Cần đóng handle hiện tại
-        // 2. Mở file để đọc
-        // 3. Đọc nội dung cần giữ lại
-        // 4. Mở lại file với cờ TRUNC
-        // 5. Ghi lại nội dung đã đọc
-        
-        char *remote_path = build_remote_path(path);
-        if (!remote_path) return -ENOMEM;
-        
-        // Đóng handle hiện tại
-        sftp_close_remote(handle);
-        fi->fh = 0;
-        
-        // Thực hiện truncate thông qua đường dẫn
-        int result = sftp_truncate_remote(remote_path, size);
-        free(remote_path);
-        
-        if (result != 0) {
-            LOG_ERR("truncate (with handle): sftp_truncate_remote failed: %d", result);
-            return -EIO;
-        }
-        
-        // Mở lại file 
-        remote_path = build_remote_path(path);
-        if (!remote_path) return -ENOMEM;
-        
-        remote_conn_info_t *conn = get_conn_info();
-        unsigned long open_flags = LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE;
-        
-        LIBSSH2_SFTP_HANDLE *new_handle = libssh2_sftp_open_ex(
-            conn->sftp_session, 
-            remote_path, 
-            strlen(remote_path), 
-            open_flags, 
-            0644, 
-            LIBSSH2_SFTP_OPENFILE
-        );
-        
-        free(remote_path);
-        
-        if (!new_handle) {
-            LOG_ERR("truncate: Failed to reopen file after truncate: %s", path);
-            return -EIO;
-        }
-        
-        // Lưu handle mới vào fi->fh
-        fi->fh = (uint64_t)new_handle;
-        return 0;
-    }
-    
-    // Trường hợp 2: Truncate thông qua đường dẫn (không có file handle)
-    char *remote_path = build_remote_path(path);
-    if (!remote_path) return -ENOMEM;
-    
-    int rc = sftp_truncate_remote(remote_path, size);
-    free(remote_path);
-    
-    if (rc != 0) {
-        LOG_ERR("truncate: sftp_truncate_remote failed for %s: %d", path, rc);
-        return -EIO;
-    }
-    
-    LOG_DEBUG("truncate OK for %s (new size: %ld)", path, size);
-    return 0;
-}
-
-int rp_unlink(const char *path) {
-    LOG_DEBUG("unlink: %s", path);
-    
-    char *remote_path = build_remote_path(path);
-    if (!remote_path) return -ENOMEM;
-    
-    // Xóa file từ xa
-    int rc = sftp_unlink_remote(remote_path);
-    free(remote_path);
-    
-    if (rc != 0) {
-        remote_conn_info_t *conn = get_conn_info();
-        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
-        int err = sftp_error_to_errno(sftp_err);
-        LOG_ERR("unlink: sftp_unlink_remote failed for %s, sftp_err=%lu -> errno=%d", path, sftp_err, err);
-        return -err ? -err : -EIO;
-    }
-    
-    LOG_DEBUG("unlink OK for %s", path);
-    return 0; // Thành công
-}
-
 int rp_mkdir(const char *path, mode_t mode) {
     LOG_DEBUG("mkdir: %s (mode: %o)", path, mode);
     
@@ -640,47 +540,180 @@ int rp_rmdir(const char *path) {
 }
 
 int rp_rename(const char *from, const char *to, unsigned int flags) {
-    LOG_DEBUG("rename: %s -> %s (flags: %u)", from, to, flags);
-    
-    // Kiểm tra flags nâng cao (FUSE 3)
+    LOG_DEBUG("rename: %s -> %s (fuse flags: %u)", from, to, flags); // Sửa tên biến flags để rõ ràng
+
+    // Kiểm tra flags nâng cao của FUSE (RENAME_NOREPLACE, RENAME_EXCHANGE)
+    // libssh2_sftp_rename_ex không trực tiếp hỗ trợ các cờ này,
+    // chỉ có OVERWRITE, ATOMIC, NATIVE.
+    // Nếu FUSE truyền cờ khác 0, tạm thời báo lỗi không hỗ trợ.
     if (flags) {
-        return -EINVAL; // Không hỗ trợ flags đặc biệt như RENAME_NOREPLACE, RENAME_EXCHANGE
+        LOG_ERR("rename: Unsupported rename flags received: %u", flags);
+        return -EINVAL; // Hoặc -ENOSYS
     }
-    
+
     char *remote_from = build_remote_path(from);
     if (!remote_from) return -ENOMEM;
-    
+
     char *remote_to = build_remote_path(to);
     if (!remote_to) {
         free(remote_from);
         return -ENOMEM;
     }
-    
-    // libssh2 không có hàm rename, nhưng SFTP v3+ hỗ trợ
+
     remote_conn_info_t *conn = get_conn_info();
     if (!conn || !conn->sftp_session) {
         free(remote_from);
         free(remote_to);
         return -ENOTCONN;
     }
-    
-    int rc = libssh2_sftp_rename_ex(conn->sftp_session, 
+
+    // *** THÊM CỜ ATOMIC VÀ NATIVE ***
+    long rename_flags = LIBSSH2_SFTP_RENAME_OVERWRITE |
+                        LIBSSH2_SFTP_RENAME_ATOMIC |
+                        LIBSSH2_SFTP_RENAME_NATIVE;
+    LOG_DEBUG("SFTP rename: %s -> %s (SFTP flags: %ld)", remote_from, remote_to, rename_flags);
+
+    int rc = libssh2_sftp_rename_ex(conn->sftp_session,
                                     remote_from, strlen(remote_from),
                                     remote_to, strlen(remote_to),
-                                    LIBSSH2_SFTP_RENAME_OVERWRITE);
-    
+                                    rename_flags); // <-- Sử dụng cờ đã kết hợp
+
     free(remote_from);
     free(remote_to);
-    
+
     if (rc != 0) {
         unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
         int err = sftp_error_to_errno(sftp_err);
         LOG_ERR("rename: libssh2_sftp_rename_ex failed, rc=%d, sftp_err=%lu -> errno=%d", rc, sftp_err, err);
+        // Trả về lỗi đã map hoặc EIO
         return -err ? -err : -EIO;
     }
-    
+
     LOG_DEBUG("rename OK: %s -> %s", from, to);
     return 0; // Thành công
 }
 
-// --- Các hàm không hỗ trợ khác ---
+int rp_fsync(const char *path, int isdatasync, struct fuse_file_info *fi) {
+    (void) path; // Thường không cần path vì đã có handle
+    LOG_DEBUG("fsync: %s (isdatasync: %d)", path ? path : "N/A", isdatasync);
+
+    LIBSSH2_SFTP_HANDLE *handle = (LIBSSH2_SFTP_HANDLE *)fi->fh;
+    if (!handle) {
+        LOG_ERR("fsync: Invalid SFTP handle");
+        // Trả về EBADF có vẻ không đúng trong ngữ cảnh fsync? Có thể là EIO.
+        return -EIO; // Hoặc -EBADF
+    }
+
+    remote_conn_info_t *conn = get_conn_info();
+    if (!conn || !conn->sftp_session) return -ENOTCONN;
+
+    // Gọi libssh2_sftp_fsync nếu server hỗ trợ
+    // isdatasync thường không được SFTP phân biệt, cứ gọi fsync bình thường
+    int rc = libssh2_sftp_fsync(handle);
+
+    if (rc == LIBSSH2_ERROR_EAGAIN) {
+         LOG_WARN("fsync: EAGAIN received, operation might take time.");
+         // Có thể thử lại hoặc trả về lỗi tạm thời? Tạm trả về thành công.
+         return 0;
+    } else if (rc != 0) {
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err);
+        // Nếu lỗi là không hỗ trợ, trả về ENOSYS
+        if (err == ENOSYS || rc == LIBSSH2_ERROR_SFTP_PROTOCOL || sftp_err == LIBSSH2_FX_OP_UNSUPPORTED) {
+             LOG_WARN("fsync: Operation not supported by server or handle for %s", path);
+             // Trả về 0 có thể chấp nhận được nếu fsync không quan trọng
+             // Trả về ENOSYS để báo rõ cho ứng dụng biết
+             return -ENOSYS;
+        }
+        LOG_ERR("fsync: libssh2_sftp_fsync failed, rc=%d, sftp_err=%lu -> errno=%d", rc, sftp_err, err);
+        return -err ? -err : -EIO;
+    }
+
+    LOG_DEBUG("fsync OK for %s", path);
+    return 0; // Thành công
+}
+
+int rp_truncate(const char *path, off_t size, struct fuse_file_info *fi) {
+    LOG_DEBUG("truncate: %s (size: %ld)", path, size);
+    remote_conn_info_t *conn = get_conn_info();
+    if (!conn || !conn->sftp_session) return -ENOTCONN;
+
+    // Sử dụng fsetstat nếu có file handle (fi != NULL) và server hỗ trợ
+    // Hiện tại libssh2 chưa có hàm fsetstat tiện lợi, ta dùng setstat qua path
+
+    char *remote_path = build_remote_path(path);
+    if (!remote_path) return -ENOMEM;
+
+    // Tạo cấu trúc attributes để đặt kích thước mới
+    LIBSSH2_SFTP_ATTRIBUTES new_attrs;
+    memset(&new_attrs, 0, sizeof(new_attrs)); // Quan trọng: Khởi tạo về 0
+
+    new_attrs.flags = LIBSSH2_SFTP_ATTR_SIZE; // Chỉ định rằng chúng ta muốn đặt size
+    new_attrs.filesize = (libssh2_uint64_t)size; // Ép kiểu sang kiểu của libssh2
+
+    LOG_DEBUG("SFTP setstat (truncate): %s to size %llu", remote_path, new_attrs.filesize);
+
+    // Gọi libssh2_sftp_setstat để thay đổi kích thước file
+    int rc = libssh2_sftp_setstat(conn->sftp_session, remote_path, &new_attrs);
+
+    free(remote_path);
+
+    if (rc != 0) {
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err);
+        LOG_ERR("truncate: libssh2_sftp_setstat failed for %s, rc=%d, sftp_err=%lu -> errno=%d",
+                path, rc, sftp_err, err);
+
+        // Xử lý thêm: Nếu lỗi là EACCES hoặc EROFS, trả về mã lỗi đó
+        if (err == EACCES || err == EROFS) {
+            return -err;
+        }
+        // Các lỗi khác trả về EIO
+        return -EIO;
+    }
+
+    LOG_DEBUG("truncate OK for %s (new size: %ld)", path, size);
+    return 0; // Thành công
+}
+
+int rp_unlink(const char *path) {
+    LOG_DEBUG("unlink: %s", path);
+
+    char *remote_path = build_remote_path(path);
+    if (!remote_path) {
+        return -ENOMEM;
+    }
+
+    remote_conn_info_t *conn = get_conn_info();
+    if (!conn || !conn->sftp_session) {
+        free(remote_path);
+        return -ENOTCONN; // Hoặc -EIO
+    }
+
+    // Gọi hàm xóa file từ xa trong client SFTP
+    int rc = sftp_unlink_remote(remote_path);
+    free(remote_path);
+
+    if (rc != 0) {
+        // Lỗi từ libssh2_sftp_unlink_ex
+        unsigned long sftp_err = libssh2_sftp_last_error(conn->sftp_session);
+        int err = sftp_error_to_errno(sftp_err); // Sử dụng helper ánh xạ lỗi
+        LOG_ERR("unlink: sftp_unlink_remote failed for %s, rc=%d, sftp_err=%lu -> errno=%d",
+                path, rc, sftp_err, err);
+
+        // Xử lý thêm: Nếu lỗi là không hỗ trợ (ENOSYS) hoặc lỗi chung (EIO),
+        // có thể là do cố gắng unlink thư mục? Trả về EISDIR.
+        if (err == ENOSYS || err == EIO) {
+             // Thử stat lại để kiểm tra xem có phải thư mục không
+             struct stat stbuf;
+             // Gọi getattr nội bộ (nếu có) hoặc giả định dựa trên ngữ cảnh
+             // Tạm thời trả về lỗi gốc đã ánh xạ hoặc EIO
+             // return -EISDIR;
+        }
+        // Trả về mã lỗi đã ánh xạ (hoặc EIO nếu không xác định được)
+        return -err ? -err : -EIO;
+    }
+
+    LOG_DEBUG("unlink OK for %s", path);
+    return 0; // Thành công
+}

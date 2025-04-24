@@ -165,6 +165,7 @@ int main(int argc, char *argv[]) {
         .rmdir      = rp_rmdir,     // Xóa thư mục
         .truncate   = rp_truncate,  // Cắt ngắn file
         .rename     = rp_rename,    // Đổi tên file/thư mục
+        .fsync      = rp_fsync,     // Đồng bộ hóa file
     };
 
     // Phân tích đối số dòng lệnh sử dụng fuse_opt_parse

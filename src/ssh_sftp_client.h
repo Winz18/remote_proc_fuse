@@ -29,7 +29,7 @@ int sftp_readdir_remote(LIBSSH2_SFTP_HANDLE *handle, char *buffer, size_t buffer
 int sftp_closedir_remote(LIBSSH2_SFTP_HANDLE *handle);
 
 // Mở file từ xa để đọc
-LIBSSH2_SFTP_HANDLE* sftp_open_remote(const char *remote_path, unsigned long flags, long mode);
+LIBSSH2_SFTP_HANDLE* sftp_open_remote(const char *remote_path, unsigned long sftp_flags, long mode);
 
 // Đọc dữ liệu từ file đã mở
 ssize_t sftp_read_remote(LIBSSH2_SFTP_HANDLE *handle, char *buffer, size_t count);
@@ -48,9 +48,6 @@ int sftp_mkdir_remote(const char *remote_path, long mode);
 
 // Xóa thư mục từ xa
 int sftp_rmdir_remote(const char *remote_path);
-
-// Cắt ngắn file từ xa
-int sftp_truncate_remote(const char *remote_path, off_t size);
 
 // Đóng file từ xa
 int sftp_close_remote(LIBSSH2_SFTP_HANDLE *handle);

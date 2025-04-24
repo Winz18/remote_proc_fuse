@@ -1,48 +1,48 @@
 # RemoteFS - FUSE-based Remote Filesystem
 
-RemoteFS là một hệ thống tập tin đa năng được phát triển bằng C, cho phép bạn "mount" bất kỳ thư mục nào từ máy chủ Linux từ xa vào hệ thống cục bộ thông qua kết nối SSH/SFTP. Ứng dụng này sử dụng FUSE (Filesystem in Userspace) và thư viện libssh2 để tạo ra một cầu nối liền mạch giữa hệ thống cục bộ và từ xa.
+RemoteFS is a versatile filesystem developed in C that allows you to mount any directory from a remote Linux server onto your local system via SSH/SFTP. It uses FUSE (Filesystem in Userspace) and the libssh2 library to create a seamless bridge between local and remote filesystems.
 
 ![RemoteFS Logo](https://example.com/remotefs-logo.png)
 
-## Tổng quan
+## Overview
 
-RemoteFS cho phép bạn làm việc với dữ liệu từ xa như thể chúng đang ở trên máy tính cục bộ của bạn. Sau khi mount, bạn có thể:
+RemoteFS lets you work with remote data as if it were on your local machine. Once mounted, you can:
 
-- Duyệt thư mục từ xa với các lệnh cục bộ như `ls`, `cd`, `find`
-- Đọc nội dung file từ xa với `cat`, `less`, `head`, `tail`
-- Chỉnh sửa file từ xa bằng trình soạn thảo yêu thích như VS Code, Vim, Nano
-- Sao chép, di chuyển, đổi tên và xóa file từ xa
-- Tự động đồng bộ hóa các thay đổi với máy chủ từ xa
-- **Sao chép và di chuyển file giữa hệ thống cục bộ và từ xa** với lệnh `remote-cp` và `remote-mv`
+- Browse remote directories using local commands like `ls`, `cd`, `find`
+- Read remote files with `cat`, `less`, `head`, `tail`
+- Edit remote files with your favorite editor (VS Code, Vim, Nano, etc.)
+- Copy, move, rename, and delete remote files
+- Automatically synchronize changes with the remote server
+- **Copy and move files between local and remote systems** using the `remote-cp` and `remote-mv` utilities
 
-## Tính năng chính
+## Features
 
-- **Truy cập từ xa liền mạch**: Mount bất kỳ thư mục nào từ máy chủ Linux từ xa
-- **Tương thích đa dạng**: Hoạt động với các lệnh shell tiêu chuẩn và ứng dụng đồ họa
-- **Hỗ trợ đầy đủ đọc/ghi**: Không chỉ xem mà còn có thể chỉnh sửa nội dung từ xa
-- **Hỗ trợ IDE**: Tương thích với VS Code, Sublime Text, và các IDE khác
-- **Bảo mật cao**: Xác thực qua SSH với hỗ trợ khóa công khai và mật khẩu
-- **Hiệu năng tối ưu**: Được thiết kế để giảm thiểu độ trễ mạng
-- **Tiện ích hỗ trợ**: Các lệnh `remote-cp` và `remote-mv` để dễ dàng sao chép và di chuyển file
+- **Seamless remote access**: Mount any directory from a remote Linux server
+- **Wide compatibility**: Works with standard shell commands and GUI applications
+- **Full read/write support**: Not just viewing, but editing remote content
+- **IDE support**: Compatible with VS Code, Sublime Text, and other IDEs
+- **Strong security**: SSH authentication with support for public key and password
+- **Optimized performance**: Designed to minimize network latency
+- **Helper utilities**: `remote-cp` and `remote-mv` for easy file transfer
 
-## Yêu cầu hệ thống
+## System Requirements
 
-### Trên máy cục bộ (client)
+### On the Local Machine (Client)
 
-- **Hệ điều hành**: Linux (đã thử nghiệm trên Ubuntu, Debian, Fedora, Kali)
-- **Trình biên dịch**: gcc, make, pkg-config
-- **Thư viện**:
-  * FUSE 3 (`libfuse3-dev` trên Debian/Ubuntu)
-  * libssh2 (`libssh2-1-dev` trên Debian/Ubuntu)
+- **Operating System**: Linux (tested on Ubuntu, Debian, Fedora, Kali)
+- **Compiler**: gcc, make, pkg-config
+- **Libraries**:
+  * FUSE 3 (`libfuse3-dev` on Debian/Ubuntu)
+  * libssh2 (`libssh2-1-dev` on Debian/Ubuntu)
 
-### Trên máy chủ từ xa (server)
+### On the Remote Server
 
-- **Hệ điều hành**: Bất kỳ hệ thống Linux nào có SSH server
-- **Dịch vụ**: OpenSSH (hoặc tương đương)
+- **Operating System**: Any Linux system with SSH server
+- **Service**: OpenSSH (or equivalent)
 
-## Cài đặt
+## Installation
 
-### Cài đặt các gói phụ thuộc
+### Install Dependencies
 
 #### Debian/Ubuntu/Kali:
 ```bash
@@ -62,199 +62,190 @@ sudo pacman -Syu
 sudo pacman -S gcc make pkg-config fuse3 libssh2
 ```
 
-### Biên dịch RemoteFS
+### Build RemoteFS
 
-1. Clone repository (hoặc tải mã nguồn về):
+1. Clone the repository (or download the source):
    ```bash
    git clone https://github.com/yourusername/remotefs.git
    cd remotefs
    ```
 
-2. Biên dịch mã nguồn:
+2. Build the source code:
    ```bash
    make
    ```
 
-3. (Tùy chọn) Cài đặt vào hệ thống:
+3. (Optional) Install to the system:
    ```bash
    sudo make install
    ```
 
-## Hướng dẫn sử dụng
+## Usage Guide
 
-### Cách mount một thư mục từ xa
+### Mounting a Remote Directory
 
-1. Tạo một thư mục mount point trên máy cục bộ:
+1. Create a local mount point:
    ```bash
    mkdir ~/remote_mount
    ```
 
-2. Mount thư mục từ xa:
+2. Mount the remote directory:
    ```bash
    remotefs ~/remote_mount -o host=server.example.com -o user=username -o key=~/.ssh/id_rsa -o remotepath=/path/to/remote/directory
    ```
-
-   hoặc nếu bạn chưa cài đặt:
+   Or if not installed system-wide:
    ```bash
    ./bin/remotefs ~/remote_mount -o host=server.example.com -o user=username -o key=~/.ssh/id_rsa -o remotepath=/path/to/remote/directory
    ```
 
-### Các tùy chọn mount
+### Mount Options
 
-| Tùy chọn | Mô tả | Mặc định |
-|----------|-------|---------|
-| host=HOSTNAME | Địa chỉ IP hoặc hostname của máy chủ từ xa | (bắt buộc) |
-| user=USERNAME | Tên người dùng SSH | (bắt buộc) |
-| port=PORT | Cổng SSH | 22 |
-| key=KEYFILE | Đường dẫn đến file khóa SSH | Không có |
-| pass=PASSWORD | Mật khẩu SSH hoặc passphrase của khóa | Không có |
-| remotepath=PATH | Đường dẫn thư mục trên máy chủ từ xa | / |
-| readonly | Mount ở chế độ chỉ đọc | Không |
-| allow_other | Cho phép các người dùng khác truy cập | Không |
+| Option         | Description                                      | Default      |
+|---------------|--------------------------------------------------|--------------|
+| host=HOSTNAME | Remote server IP or hostname                     | (required)   |
+| user=USERNAME | SSH username                                     | (required)   |
+| port=PORT     | SSH port                                         | 22           |
+| key=KEYFILE   | Path to SSH private key                          | None         |
+| pass=PASSWORD | SSH password or key passphrase                   | None         |
+| remotepath=PATH| Remote directory path to mount                   | /            |
+| readonly      | Mount as read-only                               | No           |
+| allow_other   | Allow other users to access the mount point      | No           |
 
-### Các cờ FUSE hữu ích
+### Useful FUSE Flags
 
-- `-f`: Chạy ở chế độ foreground (xem log trực tiếp)
-- `-d`: Chế độ debug với nhiều thông tin hơn
-- `-o allow_other`: Cho phép các người dùng khác truy cập vào mount point
-- `-o default_permissions`: Áp dụng kiểm tra quyền truy cập chuẩn
+- `-f`: Run in foreground (see logs directly)
+- `-d`: Debug mode with more information
+- `-o allow_other`: Allow other users to access the mount point
+- `-o default_permissions`: Apply standard permission checks
 
-### Các công cụ hỗ trợ
+### Helper Utilities
 
-RemoteFS cung cấp các công cụ bổ sung để làm việc với hệ thống file từ xa:
+RemoteFS provides additional tools for working with the remote filesystem:
 
-#### remote-cp: Sao chép file giữa hệ thống cục bộ và từ xa
+#### remote-cp: Copy files between local and remote
 
 ```bash
 remote-cp [options] <source> <destination>
 ```
 
-Ví dụ:
+Examples:
 ```bash
-# Sao chép file từ máy cục bộ lên máy từ xa
+# Copy a local file to remote
 remote-cp localfile.txt /mnt/remote/path/
 
-# Sao chép file từ máy từ xa về máy cục bộ
+# Copy a remote file to local
 remote-cp /mnt/remote/file.txt ./
 
-# Sao chép và đổi tên file
+# Copy and rename a file
 remote-cp file1.txt /mnt/remote/file2.txt
 ```
 
-Tùy chọn:
-- `-v, --verbose`: Hiển thị thông tin chi tiết
-- `-r, --recursive`: Sao chép thư mục và nội dung bên trong (chưa hỗ trợ đầy đủ)
-- `-h, --help`: Hiển thị trợ giúp
+Options:
+- `-v, --verbose`: Show detailed information
+- `-r, --recursive`: Copy directories recursively (not yet implemented)
+- `-h, --help`: Show help
 
-#### remote-mv: Di chuyển file giữa hệ thống cục bộ và từ xa
+#### remote-mv: Move files between local and remote
 
 ```bash
 remote-mv [options] <source> <destination>
 ```
 
-Ví dụ:
+Examples:
 ```bash
-# Di chuyển file từ máy cục bộ lên máy từ xa
+# Move a local file to remote
 remote-mv localfile.txt /mnt/remote/path/
 
-# Di chuyển file từ máy từ xa về máy cục bộ
+# Move a remote file to local
 remote-mv /mnt/remote/file.txt ./
 
-# Di chuyển và đổi tên file
+# Move and rename a file
 remote-mv file1.txt /mnt/remote/file2.txt
 ```
 
-Tùy chọn:
-- `-v, --verbose`: Hiển thị thông tin chi tiết
-- `-h, --help`: Hiển thị trợ giúp
+Options:
+- `-v, --verbose`: Show detailed information
+- `-h, --help`: Show help
 
-### Cách unmount
+### Unmounting
 
 ```bash
 fusermount3 -u ~/remote_mount
 ```
 
-## Ví dụ thực tế
+## Real-World Examples
 
-### Truy cập thư mục home từ xa
+### Access your remote home directory
 ```bash
 remotefs ~/remote_home -o host=myserver.com -o user=john -o key=~/.ssh/id_rsa -o remotepath=/home/john
 ```
 
-### Chỉnh sửa file cấu hình từ xa với VS Code
+### Edit a remote config file with VS Code
 ```bash
-# Sau khi mount
-code ~/remote_mount/etc/config.conf
+# After mounting
+vim ~/remote_mount/etc/config.conf
 ```
 
-### Sao chép dữ liệu từ máy cục bộ lên máy chủ từ xa
+### Copy data from local to remote server
 ```bash
 cp ~/documents/report.pdf ~/remote_mount/documents/
 ```
 
-### Tìm kiếm trên hệ thống file từ xa
+### Search files on the remote filesystem
 ```bash
 find ~/remote_mount -name "*.log" -type f -mtime -7
 ```
 
-### Xem log hệ thống từ xa
+### View remote system logs
 ```bash
 tail -f ~/remote_mount/var/log/syslog
 ```
 
-## Khắc phục sự cố
+## Troubleshooting
 
-### Các vấn đề thường gặp
+### Common Issues
 
-1. **Lỗi "Transport endpoint is not connected"**
-   - Kiểm tra kết nối mạng
-   - Xác nhận máy chủ SSH đang hoạt động
-   - Thử unmount và mount lại
+1. **"Transport endpoint is not connected" error**
+   - Check your network connection
+   - Ensure the SSH server is running
+   - Try unmounting and remounting
 
-2. **Không thể ghi file**
-   - Kiểm tra quyền truy cập trên máy chủ từ xa
-   - Đảm bảo không mount với tùy chọn readonly
-   - Kiểm tra quota và dung lượng ổ đĩa
+2. **Cannot write files**
+   - Check permissions on the remote server
+   - Make sure you did not mount with the `readonly` option
+   - Check disk quota and available space
 
-3. **Hiệu suất chậm**
-   - Giảm độ trễ mạng nếu có thể
-   - Sử dụng compression: thêm `-o compression=yes`
-   - Tăng kích thước cache: thêm `-o cache_timeout=600`
+3. **Slow performance**
+   - Reduce network latency if possible
+   - Use compression: add `-o compression=yes`
+   - Increase cache size: add `-o cache_timeout=600`
 
-## Giới hạn hiện tại
+## Current Limitations
 
-- Hiệu suất có thể bị ảnh hưởng bởi tốc độ mạng và độ trễ
-- Không hỗ trợ các thao tác nguyên tử đặc biệt
-- Trường hợp cắt ngắn file (truncate) phức tạp có thể không hoạt động tốt với một số trình soạn thảo
-- Có thể mất kết nối nếu phiên SSH bị ngắt đột ngột
+- Performance may be affected by network speed and latency
+- No support for special atomic operations
+- Complex file truncation (truncate) may not work well with some editors
+- Connection may be lost if the SSH session is interrupted
 
-## Bảo mật
+## Security
 
-- **KHÔNG** sử dụng tùy chọn `pass=` trên dòng lệnh trong môi trường sản xuất vì mật khẩu sẽ hiển thị trong lịch sử lệnh và ps
-- Luôn sử dụng xác thực khóa SSH khi có thể
-- Cân nhắc sử dụng mount ở chế độ chỉ đọc nếu không cần chỉnh sửa
-- Giới hạn quyền truy cập vào mount point (chmod 700)
+- **DO NOT** use the `pass=` option on the command line in production, as passwords will appear in command history and process lists
+- Always use SSH key authentication when possible
+- Consider mounting as read-only if you do not need to modify files
+- Restrict access to the mount point (e.g., `chmod 700`)
 
-## Đóng góp
+## Contributing
 
-Đóng góp luôn được hoan nghênh! Nếu bạn muốn cải thiện RemoteFS:
+Contributions are welcome! To improve RemoteFS:
 
-1. Fork repository
-2. Tạo nhánh tính năng (`git checkout -b feature/amazing-feature`)
-3. Commit thay đổi (`git commit -m 'Add some amazing feature'`)
-4. Push lên nhánh (`git push origin feature/amazing-feature`)
-5. Mở Pull Request
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to your branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-## Giấy phép
+## Acknowledgments
 
-Dự án này được phân phối dưới giấy phép MIT. Xem file `LICENSE` để biết thêm chi tiết.
-
-## Tác giả
-
-- **Tên của bạn** - [GitHub](https://github.com/yourusername)
-
-## Lời cảm ơn
-
-- Dự án FUSE vì đã tạo ra một framework tuyệt vời
-- Libssh2 vì đã cung cấp API SSH/SFTP đáng tin cậy
-- Cộng đồng nguồn mở vì những đóng góp và phản hồi quý báu
+- The FUSE project for a great framework
+- Libssh2 for a reliable SSH/SFTP API
+- The open source community for valuable contributions and feedback

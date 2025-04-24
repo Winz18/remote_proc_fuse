@@ -8,6 +8,10 @@
 #include <getopt.h>
 #include <sys/stat.h>
 #include <limits.h>
+#include <errno.h> // For errno
+
+// Define the global variable for command-line tools
+remote_conn_info_t *ssh_cli_conn = NULL;
 
 void show_usage(const char *progname) {
     fprintf(stderr, "Usage: %s [options] <source> <destination>\n\n", progname);
@@ -120,7 +124,7 @@ int get_remote_path(const char *path, char *remote_path, size_t size) {
 
 int main(int argc, char *argv[]) {
     int verbose = 0;
-    int recursive = 0;
+    int recursive = 0; // Keep this, even if unused for now, to avoid compiler warnings if -r is passed
     
     // Xử lý các tùy chọn
     static struct option long_options[] = {
@@ -179,70 +183,167 @@ int main(int argc, char *argv[]) {
         if (dest_is_remote) printf("Destination mount point: %s\n", dest_mount_point);
     }
     
+    // Determine which mount point configuration to use
+    const char *relevant_mount_point = NULL;
+    if (source_is_remote) {
+        relevant_mount_point = source_mount_point;
+    } else if (dest_is_remote) {
+        relevant_mount_point = dest_mount_point;
+    }
+
+    // Initialize connection if needed (i.e., if either source or dest is remote)
+    if (relevant_mount_point) {
+        ssh_cli_conn = calloc(1, sizeof(remote_conn_info_t));
+        if (!ssh_cli_conn) {
+            perror("Failed to allocate memory for connection info");
+            return 1;
+        }
+
+        // TODO: Need a function to get connection details (host, user, port)
+        //       based on the mount point from the config file.
+        //       For now, we might need to hardcode or assume a single config.
+        //       Let's assume get_connection_details_for_mount exists for now.
+
+        // Placeholder: Assume we get details for the relevant mount point
+        // This function needs to be implemented in mount_config.c/h
+        /*
+        if (get_connection_details_for_mount(relevant_mount_point, ssh_cli_conn) != 0) {
+             fprintf(stderr, "Error: Could not retrieve connection details for mount point %s\n", relevant_mount_point);
+             free(ssh_cli_conn);
+             ssh_cli_conn = NULL;
+             return 1;
+        }
+        */
+       // FIXME: Temporary placeholder until get_connection_details_for_mount is added
+       // We need to load the *correct* config based on relevant_mount_point
+       // For now, just load the first one found? Or require a specific config?
+       // Let's try loading the config associated with the mount point.
+       // We need a function like get_config_for_mount(mount_point, &host, &user, &port, &remote_base)
+
+       // Simplified approach: Assume mount_config can provide details needed for sftp_connect_and_auth
+       // We need to populate ssh_cli_conn->hostname, ssh_cli_conn->username, ssh_cli_conn->port
+       // Let's modify get_remote_path_for_mount to also return host/user/port? No, bad design.
+
+       // Need a new function in mount_config:
+       // int load_connection_info_for_mount(const char *mount_point, remote_conn_info_t *conn_info);
+       // This function would read the config file, find the section for mount_point,
+       // and populate the conn_info struct.
+
+       // *** TEMPORARY WORKAROUND: Assume details are hardcoded or globally available ***
+       // This part MUST be replaced with proper config loading based on relevant_mount_point
+       // For example, load from a default config file or environment variables if needed.
+       // Let's assume sftp_connect_and_auth can figure it out for now,
+       // *if* we provide the base remote path correctly.
+       ssh_cli_conn->remote_proc_path = get_remote_path_for_mount(relevant_mount_point); // Corrected member name
+       if (!ssh_cli_conn->remote_proc_path) { // Corrected member name
+            fprintf(stderr, "Error: Cannot determine remote base path for mount point: %s\n", relevant_mount_point);
+            free(ssh_cli_conn);
+            ssh_cli_conn = NULL;
+            return 1;
+       }
+       // We still need hostname, username, port... where do they come from?
+       // The config file must store them per mount point.
+
+       // Let's assume, for now, that sftp_connect_and_auth can use some default
+       // mechanism if hostname/user/port are NULL/0. This is unlikely to work.
+       // We *must* load the config.
+
+       fprintf(stderr, "Warning: Connection details (host, user, port) are not loaded from config. SFTP connection will likely fail.\n");
+       // TODO: Implement config loading for connection details.
+
+
+        if (sftp_connect_and_auth(ssh_cli_conn) != 0) {
+            fprintf(stderr, "Error: Failed to connect and authenticate SFTP session for %s\n", relevant_mount_point);
+            free(ssh_cli_conn->remote_proc_path); // Corrected member name
+            free(ssh_cli_conn);
+            ssh_cli_conn = NULL;
+            return 1;
+        }
+        if (verbose) {
+             printf("SFTP connection established for mount point %s\n", relevant_mount_point);
+        }
+    }
+
     // Xử lý các trường hợp
+    int result = 1; // Default to error
     if (source_is_remote && dest_is_remote) {
         // Cả nguồn và đích đều là remote - không hỗ trợ trực tiếp
         fprintf(stderr, "Error: Cannot copy directly between two remote locations\n");
-        return 1;
     } else if (!source_is_remote && !dest_is_remote) {
         // Cả nguồn và đích đều là local - sử dụng cp thông thường
         fprintf(stderr, "Note: Both paths are local, using system cp\n");
         
         char cmd[2048];
         snprintf(cmd, sizeof(cmd), "/bin/cp %s %s", source, destination);
-        return system(cmd);
+        result = system(cmd); // Use result from system call
     } else if (source_is_remote && !dest_is_remote) {
         // Sao chép từ remote về local
         char remote_path[PATH_MAX];
         if (get_remote_path(source, remote_path, sizeof(remote_path)) != 0) {
             fprintf(stderr, "Error: Cannot determine remote path\n");
-            return 1;
+            result = 1;
+        } else {
+            // Xử lý trường hợp destination là thư mục
+            struct stat st;
+            if (stat(destination, &st) == 0 && S_ISDIR(st.st_mode)) {
+                // Lấy tên file từ source
+                char *source_basename = basename(strdup(source));
+                char new_dest[PATH_MAX];
+                snprintf(new_dest, sizeof(new_dest), "%s/%s", destination, source_basename);
+                free(source_basename);
+                destination = new_dest;
+            }
+            
+            if (verbose) {
+                printf("Copying from remote %s to local %s\n", remote_path, destination);
+            }
+            
+            // Kết nối tới SFTP và sao chép
+            result = sftp_copy_remote_to_local(remote_path, destination);
         }
-        
-        // Xử lý trường hợp destination là thư mục
-        struct stat st;
-        if (stat(destination, &st) == 0 && S_ISDIR(st.st_mode)) {
-            // Lấy tên file từ source
-            char *source_basename = basename(strdup(source));
-            char new_dest[PATH_MAX];
-            snprintf(new_dest, sizeof(new_dest), "%s/%s", destination, source_basename);
-            free(source_basename);
-            destination = new_dest;
-        }
-        
-        if (verbose) {
-            printf("Copying from remote %s to local %s\n", remote_path, destination);
-        }
-        
-        // Kết nối tới SFTP và sao chép
-        return sftp_copy_remote_to_local(remote_path, destination);
     } else if (!source_is_remote && dest_is_remote) {
         // Sao chép từ local lên remote
         char remote_path[PATH_MAX];
         if (get_remote_path(destination, remote_path, sizeof(remote_path)) != 0) {
             fprintf(stderr, "Error: Cannot determine remote path\n");
-            return 1;
+            result = 1;
+        } else {
+            // Xử lý trường hợp destination là thư mục
+            struct stat st;
+            if (stat(destination, &st) == 0 && S_ISDIR(st.st_mode)) {
+                // Lấy tên file từ source
+                char *source_basename = basename(strdup(source));
+                char new_dest[PATH_MAX];
+                snprintf(new_dest, sizeof(new_dest), "%s/%s", remote_path, source_basename);
+                free(source_basename);
+                strncpy(remote_path, new_dest, sizeof(remote_path) - 1);
+                remote_path[sizeof(remote_path) - 1] = '\0';
+            }
+            
+            if (verbose) {
+                printf("Copying from local %s to remote %s\n", source, remote_path);
+            }
+            
+            // Kết nối tới SFTP và sao chép
+            result = sftp_copy_local_to_remote(source, remote_path);
         }
-        
-        // Xử lý trường hợp destination là thư mục
-        struct stat st;
-        if (stat(destination, &st) == 0 && S_ISDIR(st.st_mode)) {
-            // Lấy tên file từ source
-            char *source_basename = basename(strdup(source));
-            char new_dest[PATH_MAX];
-            snprintf(new_dest, sizeof(new_dest), "%s/%s", remote_path, source_basename);
-            free(source_basename);
-            strncpy(remote_path, new_dest, sizeof(remote_path) - 1);
-            remote_path[sizeof(remote_path) - 1] = '\0';
-        }
-        
-        if (verbose) {
-            printf("Copying from local %s to remote %s\n", source, remote_path);
-        }
-        
-        // Kết nối tới SFTP và sao chép
-        return sftp_copy_local_to_remote(source, remote_path);
+    } else {
+        // Should not happen based on checks above
+         fprintf(stderr, "Error: Invalid combination of source/destination types.\n");
+         result = 1;
     }
-    
-    return 0;
+
+    // Disconnect and clean up if connection was made
+    if (ssh_cli_conn) {
+        sftp_disconnect(ssh_cli_conn);
+        // remote_proc_path was allocated by get_remote_path_for_mount, free it
+        free(ssh_cli_conn->remote_proc_path); // Corrected member name
+        free(ssh_cli_conn);
+        ssh_cli_conn = NULL;
+        if (verbose) {
+            printf("SFTP connection closed.\n");
+        }
+    }
+
+    return result; // Return the result of the operation
 }

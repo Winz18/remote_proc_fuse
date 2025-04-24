@@ -23,9 +23,14 @@ typedef struct {
 
 } remote_conn_info_t;
 
+extern remote_conn_info_t *ssh_cli_conn;
+
 // Hàm helper để lấy thông tin kết nối từ FUSE context
 static inline remote_conn_info_t* get_conn_info() {
-    return (remote_conn_info_t*)fuse_get_context()->private_data;
+    struct fuse_context *fc = fuse_get_context();
+    if (fc && fc->private_data)
+        return (remote_conn_info_t*)fc->private_data;
+    return ssh_cli_conn;
 }
 
 // Macro tiện ích cho logging (in ra stderr để xem khi chạy FUSE với -f)
