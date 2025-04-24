@@ -2,8 +2,6 @@
 
 RemoteFS is a versatile filesystem developed in C that allows you to mount any directory from a remote Linux server onto your local system via SSH/SFTP. It uses FUSE (Filesystem in Userspace) and the libssh2 library to create a seamless bridge between local and remote filesystems.
 
-![RemoteFS Logo](https://example.com/remotefs-logo.png)
-
 ## Overview
 
 RemoteFS lets you work with remote data as if it were on your local machine. Once mounted, you can:
