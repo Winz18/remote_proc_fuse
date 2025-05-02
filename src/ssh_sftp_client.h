@@ -28,5 +28,6 @@ int sftp_error_to_errno(unsigned long sftp_err);
 int sftp_copy_local_to_remote(const char *local_path, const char *remote_path);
 int sftp_copy_remote_to_local(const char *remote_path, const char *local_path);
 int sftp_move_local_to_remote(const char *local_path, const char *remote_path);
+int sftp_move_remote_to_local(const char *remote_path, const char *local_path);
 
 #endif

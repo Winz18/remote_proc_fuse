@@ -25,27 +25,39 @@ void show_usage(const char *progname) {
 }
 
 const char* is_remote_path(const char *path, char *mount_point_buf, size_t buf_size) {
+    // Empty path check
+    if (!path || strlen(path) == 0) {
+        return NULL;
+    }
+
+    // Try to resolve the real absolute path
     char abs_path[PATH_MAX];
     if (realpath(path, abs_path) == NULL) {
+        // If realpath fails, just use the provided path directly
         strncpy(abs_path, path, sizeof(abs_path) - 1);
         abs_path[sizeof(abs_path) - 1] = '\0';
     }
     
+    // Get all mount points
     int count = 0;
     char **mount_points = get_mount_points(&count);
     if (!mount_points || count == 0) {
+        // No mount points found
         return NULL;
     }
     
+    // Check if the path starts with any of our mount points
     for (int i = 0; i < count; i++) {
         size_t len = strlen(mount_points[i]);
         if (strncmp(abs_path, mount_points[i], len) == 0 && 
             (abs_path[len] == '/' || abs_path[len] == '\0')) {
+            // Match found - copy to output buffer if provided
             if (mount_point_buf && buf_size > 0) {
                 strncpy(mount_point_buf, mount_points[i], buf_size - 1);
                 mount_point_buf[buf_size - 1] = '\0';
             }
             
+            // Free all mount points
             for (int j = 0; j < count; j++) {
                 free(mount_points[j]);
             }
@@ -55,6 +67,7 @@ const char* is_remote_path(const char *path, char *mount_point_buf, size_t buf_s
         }
     }
     
+    // No match found - free all mount points
     for (int i = 0; i < count; i++) {
         free(mount_points[i]);
     }
@@ -63,33 +76,49 @@ const char* is_remote_path(const char *path, char *mount_point_buf, size_t buf_s
     return NULL;
 }
 
-int get_remote_path(const char *path, char *remote_path, size_t size) {
-    char mount_point[PATH_MAX];
-    
-    if (!is_remote_path(path, mount_point, sizeof(mount_point))) {
+int get_remote_path(const char *path, char *remote_path, size_t size, int verbose) {
+    if (!path || !remote_path || size == 0) {
         return -1;
     }
     
+    char mount_point[PATH_MAX];
+    
+    // Determine if the path is on a remote filesystem
+    if (!is_remote_path(path, mount_point, sizeof(mount_point))) {
+        if (verbose) {
+            fprintf(stderr, "Path is not on a remote filesystem: %s\n", path);
+        }
+        return -1;
+    }
+    
+    // Get the remote base path for this mount point
     char *base_remote_path = get_remote_path_for_mount(mount_point);
     if (!base_remote_path) {
         fprintf(stderr, "Error: Cannot determine remote path for mount point: %s\n", mount_point);
         return -1;
     }
     
+    // Get the absolute path of the local path
     char abs_path[PATH_MAX];
     if (realpath(path, abs_path) == NULL) {
+        // If realpath fails, use the provided path
         strncpy(abs_path, path, sizeof(abs_path) - 1);
         abs_path[sizeof(abs_path) - 1] = '\0';
     }
     
+    // Calculate the relative part (path within the mount)
     const char *rel_path = abs_path + strlen(mount_point);
     
+    // Construct the full remote path
     if (rel_path[0] != '/' && strlen(rel_path) > 0) {
+        // Add slash if needed
         snprintf(remote_path, size, "%s/%s", base_remote_path, rel_path);
     } else {
+        // Already has a slash or is empty
         snprintf(remote_path, size, "%s%s", base_remote_path, rel_path);
     }
     
+    // Cleanup any double slashes that might occur
     if (strlen(base_remote_path) > 0 && base_remote_path[strlen(base_remote_path) - 1] == '/' && 
         rel_path[0] == '/') {
         char *double_slash = strstr(remote_path, "//");
@@ -98,7 +127,99 @@ int get_remote_path(const char *path, char *remote_path, size_t size) {
         }
     }
     
+    if (verbose) {
+        printf("Local path: %s\n", path);
+        printf("Mount point: %s\n", mount_point);
+        printf("Remote base path: %s\n", base_remote_path);
+        printf("Relative path: %s\n", rel_path);
+        printf("Full remote path: %s\n", remote_path);
+    }
+    
     free(base_remote_path);
+    return 0;
+}
+
+int setup_connection(const char *mount_point, int verbose) {
+    if (verbose) {
+        printf("Setting up connection for mount point: %s\n", mount_point);
+    }
+
+    // Allocate connection info structure
+    ssh_cli_conn = calloc(1, sizeof(remote_conn_info_t));
+    if (!ssh_cli_conn) {
+        perror("Failed to allocate memory for connection info");
+        return -1;
+    }
+
+    // Initialize to default values
+    ssh_cli_conn->sock = -1;
+    ssh_cli_conn->remote_port = 22;
+
+    // Try to load full connection information
+    int load_result = load_connection_info_for_mount(mount_point, ssh_cli_conn);
+
+    if (load_result != 0) {
+        fprintf(stderr, "Error: Cannot load connection configuration for mount point: %s\n", mount_point);
+        fprintf(stderr, "Ensure the filesystem was mounted with host, user, key/pass options.\n");
+        if (ssh_cli_conn->remote_proc_path) free(ssh_cli_conn->remote_proc_path);
+        free(ssh_cli_conn);
+        ssh_cli_conn = NULL;
+        return -1;
+    }
+
+    // Validate the loaded connection information
+    if (!ssh_cli_conn->remote_host || !ssh_cli_conn->remote_user) {
+        fprintf(stderr, "Error: Missing required connection information (host or user).\n");
+        free(ssh_cli_conn->remote_host);
+        free(ssh_cli_conn->remote_user);
+        free(ssh_cli_conn->remote_pass);
+        free(ssh_cli_conn->ssh_key_path);
+        free(ssh_cli_conn->remote_proc_path);
+        free(ssh_cli_conn);
+        ssh_cli_conn = NULL;
+        return -1;
+    }
+
+    if (!ssh_cli_conn->remote_pass && !ssh_cli_conn->ssh_key_path) {
+        fprintf(stderr, "Error: No authentication method available (password or key).\n");
+        free(ssh_cli_conn->remote_host);
+        free(ssh_cli_conn->remote_user);
+        free(ssh_cli_conn->remote_pass);
+        free(ssh_cli_conn->ssh_key_path);
+        free(ssh_cli_conn->remote_proc_path);
+        free(ssh_cli_conn);
+        ssh_cli_conn = NULL;
+        return -1;
+    }
+
+    if (verbose) {
+        printf("Connecting to %s@%s:%d\n",
+               ssh_cli_conn->remote_user,
+               ssh_cli_conn->remote_host,
+               ssh_cli_conn->remote_port);
+        printf("Authentication method: %s\n", 
+               ssh_cli_conn->ssh_key_path ? "SSH key" : "Password");
+        printf("Remote path: %s\n", 
+               ssh_cli_conn->remote_proc_path ? ssh_cli_conn->remote_proc_path : "/");
+    }
+
+    // Attempt to connect and authenticate
+    if (sftp_connect_and_auth(ssh_cli_conn) != 0) {
+        fprintf(stderr, "Error: Failed to connect and authenticate SFTP session\n");
+        free(ssh_cli_conn->remote_host);
+        free(ssh_cli_conn->remote_user);
+        free(ssh_cli_conn->remote_pass);
+        free(ssh_cli_conn->ssh_key_path);
+        free(ssh_cli_conn->remote_proc_path);
+        free(ssh_cli_conn);
+        ssh_cli_conn = NULL;
+        return -1;
+    }
+
+    if (verbose) {
+        printf("SFTP connection established successfully\n");
+    }
+
     return 0;
 }
 
@@ -157,31 +278,9 @@ int main(int argc, char *argv[]) {
     }
 
     if (relevant_mount_point) {
-        ssh_cli_conn = calloc(1, sizeof(remote_conn_info_t));
-        if (!ssh_cli_conn) {
-            perror("Failed to allocate memory for connection info");
+        // Replace the old connection setup logic with a call to the new function
+        if (setup_connection(relevant_mount_point, verbose) != 0) {
             return 1;
-        }
-
-        ssh_cli_conn->remote_proc_path = get_remote_path_for_mount(relevant_mount_point);
-         if (!ssh_cli_conn->remote_proc_path) {
-            fprintf(stderr, "Error: Cannot determine remote base path for mount point: %s\n", relevant_mount_point);
-            free(ssh_cli_conn);
-            ssh_cli_conn = NULL;
-            return 1;
-        }
-
-        fprintf(stderr, "Warning: Connection details (host, user, port) are not loaded from config. SFTP connection will likely fail.\n");
-
-        if (sftp_connect_and_auth(ssh_cli_conn) != 0) {
-            fprintf(stderr, "Error: Failed to connect and authenticate SFTP session for %s\n", relevant_mount_point);
-            free(ssh_cli_conn->remote_proc_path);
-            free(ssh_cli_conn);
-            ssh_cli_conn = NULL;
-            return 1;
-        }
-        if (verbose) {
-             printf("SFTP connection established for mount point %s\n", relevant_mount_point);
         }
     }
 
@@ -197,8 +296,8 @@ int main(int argc, char *argv[]) {
         result = system(cmd);
     } else if (source_is_remote && !dest_is_remote) {
         char remote_path[PATH_MAX];
-        if (get_remote_path(source, remote_path, sizeof(remote_path)) != 0) {
-            fprintf(stderr, "Error: Cannot determine remote path\n");
+        if (get_remote_path(source, remote_path, sizeof(remote_path), verbose) != 0) {
+            fprintf(stderr, "Error: Cannot determine remote path for %s\n", source);
             result = 1;
         } else {
             char *actual_destination = destination;
@@ -219,11 +318,14 @@ int main(int argc, char *argv[]) {
             }
             
             result = sftp_move_remote_to_local(remote_path, actual_destination);
+            if (result != 0) {
+                fprintf(stderr, "Error moving file: %s\n", strerror(-result));
+            }
         }
     } else if (!source_is_remote && dest_is_remote) {
         char remote_path[PATH_MAX];
-        if (get_remote_path(destination, remote_path, sizeof(remote_path)) != 0) {
-            fprintf(stderr, "Error: Cannot determine remote path\n");
+        if (get_remote_path(destination, remote_path, sizeof(remote_path), verbose) != 0) {
+            fprintf(stderr, "Error: Cannot determine remote path for %s\n", destination);
             result = 1;
         } else {
             LIBSSH2_SFTP_ATTRIBUTES attrs;
@@ -235,12 +337,12 @@ int main(int argc, char *argv[]) {
             }
 
             char final_remote_path[PATH_MAX];
-            strncpy(final_remote_path, remote_path, sizeof(final_remote_path) -1);
-            final_remote_path[sizeof(final_remote_path) -1] = '\0';
+            strncpy(final_remote_path, remote_path, sizeof(final_remote_path) - 1);
+            final_remote_path[sizeof(final_remote_path) - 1] = '\0';
 
             if (is_dir) {
                 char *source_basename_dup = strdup(source);
-                 if (!source_basename_dup) { perror("strdup"); result = 1; goto cleanup; }
+                if (!source_basename_dup) { perror("strdup"); result = 1; goto cleanup; }
                 char *source_basename = basename(source_basename_dup);
                 int remote_len = strlen(remote_path);
                 if (remote_len > 0 && remote_path[remote_len - 1] == '/') {
@@ -256,6 +358,9 @@ int main(int argc, char *argv[]) {
             }
             
             result = sftp_move_local_to_remote(source, final_remote_path);
+            if (result != 0) {
+                fprintf(stderr, "Error moving file: %s\n", strerror(-result));
+            }
         }
     } else {
          fprintf(stderr, "Error: Invalid combination of source/destination types.\n");
@@ -265,7 +370,14 @@ int main(int argc, char *argv[]) {
 cleanup:
     if (ssh_cli_conn) {
         sftp_disconnect(ssh_cli_conn);
+        
+        // Free all connection resources
+        free(ssh_cli_conn->remote_host);
+        free(ssh_cli_conn->remote_user);
+        free(ssh_cli_conn->remote_pass);
+        free(ssh_cli_conn->ssh_key_path);
         free(ssh_cli_conn->remote_proc_path);
+        
         free(ssh_cli_conn);
         ssh_cli_conn = NULL;
         if (verbose) {

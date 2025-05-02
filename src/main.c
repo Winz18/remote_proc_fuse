@@ -201,6 +201,13 @@ int main(int argc, char *argv[]) {
             } else {
                 LOG_INFO("Saved mount point info for tools");
             }
+            
+            // Save full connection information for utilities
+            if (save_connection_info(real_path, &connection_info) != 0) {
+                LOG_WARN("Failed to save connection information");
+            } else {
+                LOG_INFO("Saved connection info for tools");
+            }
         } else {
             LOG_WARN("Could not resolve real path for mount point: %s", mount_point);
         }

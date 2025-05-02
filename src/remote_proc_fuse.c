@@ -28,17 +28,34 @@ void* rp_init(struct fuse_conn_info *conn_info, struct fuse_config *cfg) {
         return NULL;
     }
 
+    // Enable FUSE kernel caching for attributes and directory entries.
+    // These values specify how long (in seconds) the kernel should cache
+    // this information before re-requesting it from our filesystem.
+    // Adjust these values based on how frequently remote files/directories change.
+    cfg->attr_timeout = 5.0;  // Cache attributes for 5 seconds
+    cfg->entry_timeout = 5.0; // Cache directory entries (filenames) for 5 seconds
+    cfg->negative_timeout = 1.0; // Cache negative lookups (file not found) for 1 second
+
+    // Use inode numbers provided by the filesystem (requires SFTP server support for consistent IDs, which might not always be the case)
+    // If experiencing issues with file identity, consider disabling this (cfg->use_ino = 0)
     cfg->use_ino = 1;
-    cfg->attr_timeout = 1.0;
-    cfg->entry_timeout = 1.0;
-    cfg->use_ino = 1;
+
+    // Optional: Enable kernel writeback caching for potentially better write performance.
+    // Note: This introduces a small risk of data loss on crash if data hasn't been flushed.
+    // To enable, add "-o writeback_cache" to the mount command.
+    // cfg->writeback_cache = 1; // Uncomment if enabling via mount option is desired by default
+
+    // Optional: Enable asynchronous reads for potentially better read performance.
+    // To enable, add "-o async_read" to the mount command.
+    // conn_info->async_read = 1; // Enable async reads
 
     if (sftp_connect_and_auth(conn) != 0) {
         LOG_ERR("Failed to connect to remote host during init.");
+        // Return conn here allows destroy to be called for cleanup
         return conn;
     }
 
-    LOG_INFO("Remote Proc Filesystem Initialized Successfully.");
+    LOG_INFO("Remote Proc Filesystem Initialized Successfully (Caching enabled: attr=%.1fs, entry=%.1fs).", cfg->attr_timeout, cfg->entry_timeout);
     return conn;
 }
 
