@@ -784,13 +784,8 @@ int main(int argc, char *argv[]) {
                 if (verbose) {
                     printf("Copying from local file %s to remote %s\n", source, final_remote_path);
                 }
-                 // Đảm bảo đích remote không phải là thư mục nếu nguồn là file
-                 if (is_remote_dir) {
-                      fprintf(stderr, "Error: Cannot overwrite remote directory '%s' with local file '%s'.\n", remote_path, source);
-                      result = 1;
-                 } else {
-                      result = sftp_copy_local_to_remote(source, final_remote_path);
-                 }
+                // Copy local file to computed remote path
+                result = sftp_copy_local_to_remote(source, final_remote_path);
             }
              // Chuyển đổi mã lỗi âm thành 1 nếu có lỗi, 0 nếu thành công
              if (result != 0) {
