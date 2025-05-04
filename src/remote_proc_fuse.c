@@ -3,8 +3,7 @@
 #include <libssh2_sftp.h>
 #include <stdio.h>
 #include <errno.h>
-
-remote_conn_info_t *ssh_cli_conn = NULL;
+#include "common.h"
 
 static char* build_remote_path(const char *fuse_path) {
     remote_conn_info_t *conn = get_conn_info();

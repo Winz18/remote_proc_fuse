@@ -24,6 +24,9 @@ typedef struct {
 extern remote_conn_info_t *ssh_cli_conn;
 
 static inline remote_conn_info_t* get_conn_info() {
+    // If running as a helper utility, use the global connection if set
+    if (ssh_cli_conn) 
+        return ssh_cli_conn;
     struct fuse_context *fc = fuse_get_context();
     if (fc && fc->private_data)
         return (remote_conn_info_t*)fc->private_data;

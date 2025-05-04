@@ -9,6 +9,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "common.h" // Đảm bảo include common.h
+remote_conn_info_t *ssh_cli_conn = NULL;
+
 // Helper function to log libssh2 errors
 static void log_libssh2_error(LIBSSH2_SESSION *session, const char *prefix) {
     char *errmsg;
