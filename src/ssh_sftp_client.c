@@ -257,20 +257,28 @@ int sftp_rmdir_remote(const char *remote_path) {
 int sftp_error_to_errno(unsigned long sftp_err) {
     switch (sftp_err) {
         case LIBSSH2_FX_OK:               return 0;
-        case LIBSSH2_FX_EOF:              return 0;
+        case LIBSSH2_FX_EOF:              return 0; // Thường không phải lỗi thực sự
         case LIBSSH2_FX_NO_SUCH_FILE:     return ENOENT;
-        case LIBSSH2_FX_PERMISSION_DENIED: return EACCES;
-        case LIBSSH2_FX_NO_SPACE_ON_FILESYSTEM: return ENOSPC;
+        case LIBSSH2_FX_PERMISSION_DENIED: return EACCES; // <--- Sửa thành EACCES (13)
+        case LIBSSH2_FX_FAILURE:          // Mã lỗi chung, EIO có thể phù hợp
+        case LIBSSH2_FX_BAD_MESSAGE:      // Lỗi giao thức, EIO
+        case LIBSSH2_FX_NO_CONNECTION:    // EIO hoặc ENOTCONN? EIO an toàn hơn
+        case LIBSSH2_FX_CONNECTION_LOST:  // EIO hoặc ENOTCONN? EIO an toàn hơn
+        case LIBSSH2_FX_OP_UNSUPPORTED:   return ENOSYS; // Giữ nguyên
+        case LIBSSH2_FX_INVALID_HANDLE:   return EBADF;
+        case LIBSSH2_FX_NO_SUCH_PATH:     return ENOENT;
         case LIBSSH2_FX_FILE_ALREADY_EXISTS: return EEXIST;
         case LIBSSH2_FX_WRITE_PROTECT:    return EROFS;
-        case LIBSSH2_FX_NO_MEDIA:         return ENODEV;
-        case LIBSSH2_FX_NO_SUCH_PATH:     return ENOENT;
-        case LIBSSH2_FX_NOT_A_DIRECTORY:  return ENOTDIR;
-        case LIBSSH2_FX_INVALID_HANDLE:   return EBADF;
-        case LIBSSH2_FX_INVALID_FILENAME: return EINVAL;
+        case LIBSSH2_FX_NO_MEDIA:         return ENODEV; // Hoặc EIO
+        case LIBSSH2_FX_NO_SPACE_ON_FILESYSTEM: return ENOSPC;
+        case LIBSSH2_FX_QUOTA_EXCEEDED:   return EDQUOT;
+        case LIBSSH2_FX_UNKNOWN_PRINCIPAL: return EINVAL; // Có thể?
+        case LIBSSH2_FX_LOCK_CONFLICT:    return EDEADLK; // Hoặc EAGAIN?
         case LIBSSH2_FX_DIR_NOT_EMPTY:    return ENOTEMPTY;
-        case LIBSSH2_FX_OP_UNSUPPORTED:   return ENOSYS;
-        default:                          return EIO;
+        case LIBSSH2_FX_NOT_A_DIRECTORY:  return ENOTDIR;
+        case LIBSSH2_FX_INVALID_FILENAME: return EINVAL;
+        case LIBSSH2_FX_LINK_LOOP:        return ELOOP;
+        default:                          return EIO; // Lỗi I/O chung cho các trường hợp khác
     }
 }
 
