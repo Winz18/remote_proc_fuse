@@ -15,3 +15,5 @@ bin/
 # Ví dụ: cấu hình local, file log riêng...
 # *.log
 # config.local
+test-dir/file-1.txt
+test-dir/file-2.txt
